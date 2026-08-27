@@ -1,0 +1,39 @@
+name: Feature or mapping request
+description: Propose support for a Typst construct, DOCX element, or converter behavior
+title: "[feature] "
+labels: [enhancement]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Typst reader
+        - Typst writer
+        - DOCX reader
+        - DOCX writer
+        - Math / OMML
+        - Round-trip preservation
+        - Mapping documentation
+        - CLI / packaging
+    validations:
+      required: true
+  - type: textarea
+    id: construct
+    attributes:
+      label: Construct or behavior
+      description: Show the Typst syntax and/or OOXML element involved.
+    validations:
+      required: true
+  - type: textarea
+    id: semantics
+    attributes:
+      label: Desired conversion semantics
+      description: Explain what should be preserved and what approximation, if any, is acceptable.
+    validations:
+      required: true
+  - type: textarea
+    id: references
+    attributes:
+      label: Specification references
+      description: Links to relevant Typst, ECMA-376, ISO/IEC 29500, or MS-DOCX documentation are especially useful.

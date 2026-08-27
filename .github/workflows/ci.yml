@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          check-latest: false
+
+      - name: Show Python version
+        run: python --version
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tests scripts
+
+      - name: Check version metadata
+        run: python scripts/check_version.py
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+  build:
+    name: Build reproducible release artifacts
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: Build release artifacts
+        run: python scripts/build_release.py
+
+      - name: Verify release artifacts
+        run: python scripts/verify_release.py
+
+      - name: Record first reproducibility manifest
+        run: cp dist/SHA256SUMS.txt /tmp/SHA256SUMS.first.txt
+
+      - name: Rebuild from the same checkout
+        run: python scripts/build_release.py
+
+      - name: Verify deterministic hashes
+        run: diff -u /tmp/SHA256SUMS.first.txt dist/SHA256SUMS.txt
+
+      - name: Smoke-test zip application
+        run: |
+          VERSION="$(python scripts/check_version.py --print-version)"
+          python "dist/typx-${VERSION}.pyz" --version
+          python "dist/typx-${VERSION}.pyz" mapping --query equation --format json > /tmp/mapping.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: typx-release-candidate
+          path: |
+            dist/typx-*.pyz
+            dist/typx-*-source.zip
+            dist/typx-*-bundle.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible conversion, parsing, preservation, or packaging problem
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove confidential material before attaching documents. For security-sensitive issues, use SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: typx version
+      description: Output of `typx --version` or the release asset name.
+    validations:
+      required: true
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction
+      options:
+        - Typst to DOCX
+        - DOCX to Typst
+        - Validation or inspection
+        - Build or packaging
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include the command and the smallest non-sensitive input that demonstrates the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and Python version
+      placeholder: Ubuntu 24.04, Python 3.13

@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          check-latest: false
+
+      - name: Check version metadata
+        if: github.event_name == 'workflow_dispatch'
+        run: python scripts/check_version.py
+
+      - name: Require tag to match package version
+        if: github.event_name == 'push'
+        run: python scripts/check_version.py --tag "${GITHUB_REF_NAME}"
+
+      - name: Compile Python sources
+        run: python -m compileall -q src tests scripts
+
+      - name: Run unit tests
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+      - name: Build release artifacts
+        run: python scripts/build_release.py
+
+      - name: Verify release artifacts
+        run: python scripts/verify_release.py
+
+      - name: Record first reproducibility manifest
+        run: cp dist/SHA256SUMS.txt /tmp/SHA256SUMS.first.txt
+
+      - name: Rebuild from the same checkout
+        run: python scripts/build_release.py
+
+      - name: Verify deterministic hashes
+        run: diff -u /tmp/SHA256SUMS.first.txt dist/SHA256SUMS.txt
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: typx-release
+          path: |
+            dist/typx-*.pyz
+            dist/typx-*-source.zip
+            dist/typx-*-bundle.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(python scripts/check_version.py --print-version)"
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/typx-${VERSION}.pyz" \
+            "dist/typx-${VERSION}-source.zip" \
+            "dist/typx-${VERSION}-bundle.zip" \
+            "dist/SHA256SUMS.txt" \
+            --verify-tag \
+            --generate-notes \
+            --title "typx ${VERSION}"
