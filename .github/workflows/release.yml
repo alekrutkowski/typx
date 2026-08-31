@@ -2,12 +2,15 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
+    branches:
+      - main
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: continuous-release
+  cancel-in-progress: true
 
 jobs:
   release:
