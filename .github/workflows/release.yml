@@ -1,24 +1,16 @@
 name: Release
 
 on:
-  push:
-    branches:
-      - main
+  workflow_call:
 
 permissions:
   contents: write
 
-concurrency:
-  group: continuous-release
-  cancel-in-progress: true
-
 jobs:
   release:
-    name: Build and publish
+    name: Build and publish rolling release
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
 
     steps:
       - name: Check out repository
@@ -33,20 +25,12 @@ jobs:
           check-latest: false
 
       - name: Check version metadata
-        if: github.event_name == 'workflow_dispatch'
         run: python scripts/check_version.py
 
-      - name: Require tag to match package version
-        if: github.event_name == 'push'
-        run: python scripts/check_version.py --tag "${GITHUB_REF_NAME}"
-
-      - name: Compile Python sources
-        run: python -m compileall -q src tests scripts
-
-      - name: Run unit tests
-        env:
-          PYTHONPATH: src
-        run: python -m unittest discover -s tests -v
+      - name: Read package version
+        id: version
+        shell: bash
+        run: echo "version=$(python scripts/check_version.py --print-version)" >> "$GITHUB_OUTPUT"
 
       - name: Build release artifacts
         run: python scripts/build_release.py
@@ -63,11 +47,17 @@ jobs:
       - name: Verify deterministic hashes
         run: diff -u /tmp/SHA256SUMS.first.txt dist/SHA256SUMS.txt
 
-      - name: Upload workflow artifact
+      - name: Smoke-test rolling zip application
+        run: |
+          python dist/typx.pyz --version
+          python dist/typx.pyz mapping --query equation --format json > /tmp/mapping.json
+
+      - name: Upload publication artifact
         uses: actions/upload-artifact@v7
         with:
-          name: typx-release
+          name: typx-published-${{ github.sha }}
           path: |
+            dist/typx.pyz
             dist/typx-*.pyz
             dist/typx-*-source.zip
             dist/typx-*-bundle.zip
@@ -75,17 +65,45 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub Release
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Check that this commit is still main HEAD
+        id: current
+        shell: bash
         run: |
-          VERSION="$(python scripts/check_version.py --print-version)"
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/typx-${VERSION}.pyz" \
-            "dist/typx-${VERSION}-source.zip" \
-            "dist/typx-${VERSION}-bundle.zip" \
-            "dist/SHA256SUMS.txt" \
-            --verify-tag \
-            --generate-notes \
-            --title "typx ${VERSION}"
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" = "$GITHUB_SHA" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "A newer main commit exists; this rolling release update is superseded."
+          fi
+
+      - name: Move rolling release tag to this commit
+        if: steps.current.outputs.publish == 'true'
+        shell: bash
+        run: |
+          git tag --force continuous "$GITHUB_SHA"
+          git push origin refs/tags/continuous --force
+
+      - name: Publish rolling GitHub Release
+        if: steps.current.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: continuous
+          target_commitish: ${{ github.sha }}
+          name: Latest main build
+          body: |
+            Automatically rebuilt from the latest successful `main` commit.
+
+            Commit: `${{ github.sha }}`
+            Package version: `${{ steps.version.outputs.version }}`
+
+            `typx.pyz` is the stable-name executable for this rolling release.
+          files: |
+            dist/typx.pyz
+            dist/typx-*.pyz
+            dist/typx-*-source.zip
+            dist/typx-*-bundle.zip
+            dist/SHA256SUMS.txt
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true

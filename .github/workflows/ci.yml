@@ -77,18 +77,26 @@ jobs:
 
       - name: Smoke-test zip application
         run: |
-          VERSION="$(python scripts/check_version.py --print-version)"
-          python "dist/typx-${VERSION}.pyz" --version
-          python "dist/typx-${VERSION}.pyz" mapping --query equation --format json > /tmp/mapping.json
+          python dist/typx.pyz --version
+          python dist/typx.pyz mapping --query equation --format json > /tmp/mapping.json
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
           name: typx-release-candidate
           path: |
+            dist/typx.pyz
             dist/typx-*.pyz
             dist/typx-*-source.zip
             dist/typx-*-bundle.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    name: Publish latest main build
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml

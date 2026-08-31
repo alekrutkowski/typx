@@ -48,18 +48,19 @@ def main() -> int:
         raise RuntimeError("Version metadata does not match")
 
     prefix = f"typx-{version}"
+    generic_pyz = DIST / "typx.pyz"
     pyz = DIST / f"{prefix}.pyz"
     source_zip = DIST / f"{prefix}-source.zip"
     bundle_zip = DIST / f"{prefix}-bundle.zip"
     manifest = DIST / "SHA256SUMS.txt"
 
-    expected = [pyz, source_zip, bundle_zip, manifest]
+    expected = [generic_pyz, pyz, source_zip, bundle_zip, manifest]
     missing = [str(path) for path in expected if not path.is_file()]
     if missing:
         raise RuntimeError(f"Missing release artifacts: {missing}")
 
     recorded = checksum_manifest(manifest)
-    for path in (pyz, source_zip, bundle_zip):
+    for path in (generic_pyz, pyz, source_zip, bundle_zip):
         actual = sha256(path)
         wanted = recorded.get(path.name)
         if wanted != actual:
@@ -67,8 +68,11 @@ def main() -> int:
                 f"SHA-256 mismatch for {path.name}: manifest={wanted!r}, actual={actual!r}"
             )
 
+    if generic_pyz.read_bytes() != pyz.read_bytes():
+        raise RuntimeError(f"{generic_pyz.name} and {pyz.name} differ")
+
     result = subprocess.run(
-        [sys.executable, str(pyz), "--version"],
+        [sys.executable, str(generic_pyz), "--version"],
         check=True,
         capture_output=True,
         text=True,
@@ -106,7 +110,7 @@ def main() -> int:
             raise RuntimeError("Source ZIP unexpectedly contains dist/ artifacts")
 
     print(f"Verified typx {version} release artifacts")
-    for path in (pyz, source_zip, bundle_zip):
+    for path in (generic_pyz, pyz, source_zip, bundle_zip):
         print(f"{sha256(path)}  {path.name}")
     return 0
 

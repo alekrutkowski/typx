@@ -34,27 +34,27 @@ This design has three practical advantages:
 
 ### Use the single-file application
 
-After downloading a release asset such as `typx-0.3.2.pyz`:
+After downloading the latest release asset [`typx.pyz`](https://github.com/alekrutkowski/typx/releases/latest/download/typx.pyz):
 
 Linux or WSL2:
 
 ```bash
-python3 typx-0.3.2.pyz report.typ report.docx
-python3 typx-0.3.2.pyz report.docx report.typ
+python3 typx.pyz report.typ report.docx
+python3 typx.pyz report.docx report.typ
 ```
 
 Windows 11:
 
 ```powershell
-py typx-0.3.2.pyz report.typ report.docx
-py typx-0.3.2.pyz report.docx report.typ
+py typx.pyz report.typ report.docx
+py typx.pyz report.docx report.typ
 ```
 
 The explicit form is equivalent:
 
 ```bash
-python3 typx-0.3.2.pyz convert report.typ report.docx
-python3 typx-0.3.2.pyz convert report.docx report.typ
+python3 typx.pyz convert report.typ report.docx
+python3 typx.pyz convert report.docx report.typ
 ```
 
 ### Run from a source checkout
@@ -101,13 +101,13 @@ $ sum_(i=1)^n i = n(n + 1) / 2 $
 Convert it with:
 
 ```bash
-python3 typx-0.3.2.pyz hello.typ hello.docx
+python3 typx.pyz hello.typ hello.docx
 ```
 
 Going the other way is symmetrical:
 
 ```bash
-python3 typx-0.3.2.pyz memo.docx memo.typ
+python3 typx.pyz memo.docx memo.typ
 ```
 
 ## Typst-aligned DOCX defaults
@@ -167,7 +167,7 @@ This is different from semantic conversion. It is a preservation mechanism, not 
 ## Round-trip modes
 
 ```bash
-python3 typx-0.3.2.pyz convert input.typ output.docx --roundtrip auto
+python3 typx.pyz convert input.typ output.docx --roundtrip auto
 ```
 
 | Mode | Meaning |
@@ -335,6 +335,7 @@ python3 scripts/verify_release.py
 The release builder creates:
 
 ```text
+dist/typx.pyz
 dist/typx-X.Y.Z.pyz
 dist/typx-X.Y.Z-source.zip
 dist/typx-X.Y.Z-bundle.zip
@@ -350,16 +351,9 @@ More detail is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [CONTRIBUTING.m
 Two workflows are included:
 
 - **CI** runs on pushes and pull requests, tests Python 3.11 through 3.14, compiles the Python files, builds the release artifacts, verifies them, checks reproducibility, and uploads the resulting `dist` files as a workflow artifact.
-- **Release** runs when a tag beginning with `v` is pushed. It verifies that the tag exactly matches the package version, runs tests, rebuilds and verifies all release files, then publishes them as GitHub Release assets. It can also be run manually to perform a release build without publishing a GitHub Release.
+- **Release** is a reusable workflow called by CI only after the full test matrix and reproducible-build job succeed for a push to `main`. It rebuilds and verifies the artifacts, moves the rolling `continuous` tag to the successful commit, and updates the GitHub Release named **Latest main build**. Existing release assets are replaced in place.
 
-For version `0.3.2`, publishing is therefore:
-
-```bash
-git tag -a v0.3.2 -m "typx 0.3.2"
-git push origin v0.3.2
-```
-
-The workflow refuses a tag such as `v0.3.2` while the package still declares version `0.3.2`.
+No version tag or manual GitHub release command is required. The stable rolling executable is `typx.pyz`; versioned release artifacts are published alongside it.
 
 See [docs/RELEASING.md](docs/RELEASING.md).
 
@@ -374,13 +368,7 @@ git commit -m "Initial public release"
 git branch -M main
 ```
 
-If you use GitHub CLI, you can then create and push the repository in one command:
-
-```bash
-gh repo create typx --public --source=. --remote=origin --push
-```
-
-Once `main` is on GitHub, push a version tag to trigger the automated release workflow.
+Create the GitHub repository by whichever method is available in your environment, add it as `origin`, and push `main`. The first push to `main` triggers the automated rolling release workflow; subsequent pushes update the same release automatically.
 
 ## Standards baseline and references
 

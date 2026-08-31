@@ -67,11 +67,7 @@ The version currently lives in both `pyproject.toml` and `src/typx/constants.py`
 python3 scripts/check_version.py
 ```
 
-For a release tag:
-
-```bash
-python3 scripts/check_version.py --tag v0.3.2
-```
+Release publication does not depend on a version tag. Every successful push to `main` updates the rolling GitHub Release.
 
 ## Reproducibility
 

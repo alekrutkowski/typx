@@ -1,23 +1,49 @@
 # Release guide
 
-GitHub Actions is configured so that a version tag is the publication trigger.
+GitHub Actions publishes a rolling release automatically after every successful push to `main`.
+No version tag or manual GitHub release command is required.
 
-## 1. Prepare the version
+## Automatic publication
 
-Update both:
+A push to `main` starts `.github/workflows/ci.yml`. After the complete CI test matrix and reproducible-build job succeed, CI calls `.github/workflows/release.yml` as a reusable workflow. The release workflow:
+
+1. checks that `pyproject.toml` and `src/typx/constants.py` contain the same version;
+2. rebuilds the deterministic release artifacts from the tested commit;
+3. verifies the artifacts and their checksums;
+4. rebuilds them again and checks reproducibility;
+5. smoke-tests `dist/typx.pyz`;
+6. confirms that the tested commit is still the head of `main`;
+7. moves the lightweight `continuous` tag to that commit;
+8. updates the GitHub Release named **Latest main build**, replacing its previous assets.
+
+If a newer `main` commit arrives while an older run is finishing, the older run does not overwrite the rolling release.
+
+The release is marked as the repository's latest release. The stable download filename is:
+
+```text
+typx.pyz
+```
+
+The versioned `.pyz`, source ZIP, bundle ZIP, and checksum manifest are published alongside it.
+
+## Version metadata
+
+The package version still lives in both:
 
 - `pyproject.toml`;
 - `src/typx/constants.py`.
 
-Update `CHANGELOG.md` with the release date and noteworthy changes.
+Update these values when you intentionally change the software version. A version change is ordinary source metadata and is not a publication trigger. Every push to `main` is published regardless of whether the version changed.
 
-Check consistency:
+Check version consistency locally with:
 
 ```bash
 python3 scripts/check_version.py
 ```
 
-## 2. Run the release checks locally
+## Local release checks
+
+Before pushing, the same core checks can be run locally:
 
 ```bash
 python3 -m compileall -q src tests scripts
@@ -36,44 +62,22 @@ diff -u /tmp/typx-sha-before.txt dist/SHA256SUMS.txt
 
 On Windows, compare the two files with your preferred file or hash comparison tool.
 
-## 3. Commit the release preparation
+## Published assets
 
-```bash
-git add .
-git commit -m "Prepare typx 0.3.2"
-git push origin main
-```
-
-Wait for the normal CI workflow to pass.
-
-## 4. Tag the exact commit
-
-For version `0.3.2`:
-
-```bash
-git tag -a v0.3.2 -m "typx 0.3.2"
-git push origin v0.3.2
-```
-
-The release workflow checks that `v0.3.2` exactly matches the package version `0.3.2`. A mismatched tag fails before publication.
-
-## 5. What GitHub Actions publishes
-
-A successful tagged build publishes these assets:
+For package version `0.3.2`, for example, the rolling release contains:
 
 ```text
+typx.pyz
 typx-0.3.2.pyz
 typx-0.3.2-source.zip
 typx-0.3.2-bundle.zip
 SHA256SUMS.txt
 ```
 
-The GitHub Release notes are generated automatically from the repository history and the categories in `.github/release.yml`.
+`typx.pyz` and the versioned `.pyz` contain identical bytes. The stable name exists so users do not have to know the package version to download the current build.
 
-## Manual build workflow
+## GitHub token and action permissions
 
-The Release workflow also supports `workflow_dispatch`. A manual run performs tests and produces downloadable workflow artifacts but does not create a GitHub Release because there is no authoritative version tag.
+The workflow grants only `contents: write`, which is required to move the `continuous` tag and update the release. It uses GitHub's automatically provided workflow token; no personal access token and no locally installed GitHub CLI are required.
 
-## Action versions
-
-The workflows intentionally use tagged major versions of official GitHub actions rather than branch names. Dependabot is configured to propose GitHub Actions updates.
+The workflow uses tagged major versions of its GitHub Actions dependencies. Dependabot is configured to propose GitHub Actions updates.

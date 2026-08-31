@@ -107,6 +107,7 @@ def main() -> None:
     _write_source_zip(source_zip, prefix, files)
 
     preliminary = {
+        generic_pyz.name: _sha256(generic_pyz),
         versioned_pyz.name: _sha256(versioned_pyz),
         source_zip.name: _sha256(source_zip),
     }
@@ -123,6 +124,7 @@ def main() -> None:
     )
 
     checksums = {
+        generic_pyz.name: _sha256(generic_pyz),
         versioned_pyz.name: _sha256(versioned_pyz),
         source_zip.name: _sha256(source_zip),
         bundle_zip.name: _sha256(bundle_zip),
