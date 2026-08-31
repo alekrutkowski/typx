@@ -70,7 +70,7 @@ python3 scripts/check_version.py
 For a release tag:
 
 ```bash
-python3 scripts/check_version.py --tag v0.1.0
+python3 scripts/check_version.py --tag v0.3.2
 ```
 
 ## Reproducibility

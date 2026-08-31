@@ -14,9 +14,9 @@ This summary describes the 442 rows in the full directional matrix. Counts are m
 
 | Status | Typst to DOCX | DOCX to Typst |
 |---|---:|---:|
-| `full` | 125 | 191 |
-| `partial` | 287 | 69 |
-| `preserve` | 13 | 51 |
+| `full` | 125 | 196 |
+| `partial` | 287 | 65 |
+| `preserve` | 13 | 50 |
 | `none` | 17 | 131 |
 
 ## Conceptual fidelity by direction
@@ -24,9 +24,9 @@ This summary describes the 442 rows in the full directional matrix. Counts are m
 | Fidelity | Typst to DOCX | DOCX to Typst |
 |---|---:|---:|
 | `exact` | 21 | 22 |
-| `high` | 173 | 158 |
-| `approximate` | 95 | 95 |
-| `preserve` | 33 | 36 |
+| `high` | 176 | 162 |
+| `approximate` | 93 | 92 |
+| `preserve` | 32 | 35 |
 | `evaluate` | 104 | 0 |
 | `none` | 16 | 131 |
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "typx"
-version = "0.1.0"
+version = "0.3.2"
 description = "Bidirectional static converter between Typst and DOCX with exact round-trip preservation"
 readme = "README.md"
 requires-python = ">=3.11"

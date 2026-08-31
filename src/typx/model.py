@@ -152,20 +152,29 @@ class ListProperties:
 class SectionProperties:
     page_width_pt: float = 595.276
     page_height_pt: float = 841.89
-    margin_top_pt: float = 72.0
-    margin_bottom_pt: float = 72.0
-    margin_left_pt: float = 72.0
-    margin_right_pt: float = 72.0
+    # Typst's default A4 auto margin is exactly 2.5 cm.
+    margin_top_pt: float = 70.8661417323
+    margin_bottom_pt: float = 70.8661417323
+    margin_left_pt: float = 70.8661417323
+    margin_right_pt: float = 70.8661417323
     gutter_pt: float = 0.0
-    header_distance_pt: float = 36.0
-    footer_distance_pt: float = 36.0
+    # Typst raises/lowers headers and footers by 30% of the margin, so on
+    # default A4 their baseline region starts about 70% of a margin from the edge.
+    header_distance_pt: float = 49.6062992126
+    footer_distance_pt: float = 49.6062992126
     orientation: str = "portrait"
+    section_type: str | None = None
     columns: int = 1
-    column_spacing_pt: float = 36.0
+    # Typst columns use a 4% gutter by default. The writer recomputes this
+    # from the active content width for Typst sources; this A4 value is the
+    # model fallback.
+    column_spacing_pt: float = 18.1417322835
     equal_column_width: bool = True
     column_widths_pt: list[float] = field(default_factory=list)
     page_number_start: int | None = None
     page_number_format: str | None = None
+    page_numbering: str | None = None
+    page_number_align: str | None = None
     title_page: bool = False
     different_odd_even: bool = False
     vertical_align: str | None = None
@@ -233,6 +242,23 @@ class Link(Inline):
         self.children = children or []
         self.tooltip = tooltip
         self.anchor = anchor
+
+
+@dataclass(slots=True)
+class Reference(Inline):
+    target: str
+    children: list[Inline] = field(default_factory=list)
+    supplement: str | None = None
+    form: Literal["normal", "page"] = "normal"
+
+    def __init__(self, target: str, children: list[Inline] | None = None,
+                 supplement: str | None = None,
+                 form: Literal["normal", "page"] = "normal"):
+        self.kind = "reference"
+        self.target = target
+        self.children = children or []
+        self.supplement = supplement
+        self.form = form
 
 
 @dataclass(slots=True)
@@ -410,6 +436,8 @@ class Heading(Block):
     level: int
     inlines: list[Inline] = field(default_factory=list)
     numbering: str | None = None
+    number_text: str | None = None
+    supplement: str | None = None
     label: str | None = None
     outlined: bool = True
     bookmarked: bool = True
@@ -417,12 +445,15 @@ class Heading(Block):
 
     def __init__(self, level: int, inlines: list[Inline] | None = None,
                  numbering: str | None = None, label: str | None = None,
+                 number_text: str | None = None, supplement: str | None = None,
                  outlined: bool = True, bookmarked: bool = True,
                  style: ParagraphStyle | None = None):
         self.kind = "heading"
         self.level = level
         self.inlines = inlines or []
         self.numbering = numbering
+        self.number_text = number_text
+        self.supplement = supplement
         self.label = label
         self.outlined = outlined
         self.bookmarked = bookmarked
@@ -535,11 +566,13 @@ class Figure(Block):
     placement: str | None = None
     align: str | None = None
     supplement: str | None = None
+    number_text: str | None = None
 
     def __init__(self, body: list[Block] | None = None, caption: list[Inline] | None = None,
                  kind_name: str = "figure", label: str | None = None,
                  numbering: str | None = None, placement: str | None = None,
-                 align: str | None = None, supplement: str | None = None):
+                 align: str | None = None, supplement: str | None = None,
+                 number_text: str | None = None):
         self.kind = "figure"
         self.body = body or []
         self.caption = caption or []
@@ -549,6 +582,7 @@ class Figure(Block):
         self.placement = placement
         self.align = align
         self.supplement = supplement
+        self.number_text = number_text
 
 
 @dataclass(slots=True)
@@ -571,14 +605,16 @@ class CodeBlock(Block):
     language: str | None = None
     block: bool = True
     syntaxes: list[str] = field(default_factory=list)
+    style: TextStyle = field(default_factory=TextStyle)
 
     def __init__(self, text: str, language: str | None = None, block: bool = True,
-                 syntaxes: list[str] | None = None):
+                 syntaxes: list[str] | None = None, style: TextStyle | None = None):
         self.kind = "code"
         self.text = text
         self.language = language
         self.block = block
         self.syntaxes = syntaxes or []
+        self.style = style or TextStyle()
 
 
 @dataclass(slots=True)
@@ -587,14 +623,19 @@ class MathBlock(Block):
     omml: str | None = None
     numbering: str | None = None
     label: str | None = None
+    supplement: str | None = None
+    number_text: str | None = None
 
     def __init__(self, typst: str, omml: str | None = None,
-                 numbering: str | None = None, label: str | None = None):
+                 numbering: str | None = None, label: str | None = None,
+                 supplement: str | None = None, number_text: str | None = None):
         self.kind = "math"
         self.typst = typst
         self.omml = omml
         self.numbering = numbering
         self.label = label
+        self.supplement = supplement
+        self.number_text = number_text
 
 
 @dataclass(slots=True)
@@ -709,6 +750,11 @@ class Document:
     source_path: str | None = None
     source_text: str | None = None
     raw_package_parts: dict[str, bytes] = field(default_factory=dict)
+    bibliography_resource_id: str | None = None
+    bibliography_keys: dict[str, str] = field(default_factory=dict)
+    bibliography_style: str | None = None
+    font_resource_ids: list[str] = field(default_factory=list)
+    font_families: dict[str, list[str]] = field(default_factory=dict)
     roundtrip: dict[str, Any] = field(default_factory=dict)
 
     def add_resource(self, resource: Resource) -> str:

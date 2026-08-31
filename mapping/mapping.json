@@ -1324,13 +1324,13 @@
       "category": "Document model",
       "typst": "bibliography",
       "typst_kind": "element",
-      "docx": "bibliography sources, CITATION/BIBLIOGRAPHY fields, or static paragraphs",
-      "docx_part": "word/bibliography.xml / document.xml",
+      "docx": "bibliography sources plus CITATION/BIBLIOGRAPHY fields or static paragraphs",
+      "docx_part": "customXml bibliography source store + word/document.xml",
       "typst_to_docx": "approximate",
-      "docx_to_typst": "approximate",
+      "docx_to_typst": "high",
       "implementation_t2d": "partial",
-      "implementation_d2t": "partial",
-      "notes": "CSL processing and Word bibliography engines differ. Citation keys and visible fallback are retained."
+      "implementation_d2t": "full",
+      "notes": "Word bibliography source records are converted to BibLaTeX and common Word styles map to Typst built-ins; grouped/unsupported field variants retain cached visible fallback."
     },
     {
       "id": "M0100",
@@ -1342,8 +1342,8 @@
       "typst_to_docx": "high",
       "docx_to_typst": "high",
       "implementation_t2d": "full",
-      "implementation_d2t": "partial",
-      "notes": "Multiple keys and supplements are mapped to field switches where possible."
+      "implementation_d2t": "full",
+      "notes": "Single-source Word citations map to native Typst cite calls including page supplements; grouped Word citations preserve cached combined display while registering each source invisibly."
     },
     {
       "id": "M0101",
@@ -4806,14 +4806,14 @@
     {
       "id": "M0367",
       "category": "DOCX-specific",
-      "typst": "bibliography/cite",
+      "typst": "bibliography/cite + generated BibLaTeX asset",
       "typst_kind": "closest Typst representation",
       "docx": "bibliography sources",
       "docx_part": "multiple OOXML parts",
-      "typst_to_docx": "approximate",
-      "docx_to_typst": "approximate",
+      "typst_to_docx": "high",
+      "docx_to_typst": "high",
       "implementation_t2d": "partial",
-      "implementation_d2t": "partial",
+      "implementation_d2t": "full",
       "notes": "Unsupported Word extensions are retained as compressed raw OOXML when possible; exact package recovery is available for untouched generated counterparts."
     },
     {
@@ -4871,14 +4871,14 @@
     {
       "id": "M0372",
       "category": "DOCX-specific",
-      "typst": "font reference only",
+      "typst": "project font assets + font-family reference",
       "typst_kind": "closest Typst representation",
       "docx": "embedded fonts/font obfuscation",
       "docx_part": "multiple OOXML parts",
-      "typst_to_docx": "preserve",
-      "docx_to_typst": "preserve",
+      "typst_to_docx": "high",
+      "docx_to_typst": "high",
       "implementation_t2d": "partial",
-      "implementation_d2t": "preserve",
+      "implementation_d2t": "full",
       "notes": "Unsupported Word extensions are retained as compressed raw OOXML when possible; exact package recovery is available for untouched generated counterparts."
     },
     {
@@ -5729,14 +5729,14 @@
     {
       "id": "M0438",
       "category": "DOCX-specific",
-      "typst": "bibliography/citation keys and metadata",
+      "typst": "BibLaTeX bibliography/citation keys and metadata",
       "typst_kind": "closest Typst representation",
-      "docx": "bibliography.xml source records",
+      "docx": "customXml bibliography source records",
       "docx_part": "multiple OOXML parts",
-      "typst_to_docx": "approximate",
-      "docx_to_typst": "approximate",
+      "typst_to_docx": "high",
+      "docx_to_typst": "high",
       "implementation_t2d": "partial",
-      "implementation_d2t": "partial",
+      "implementation_d2t": "full",
       "notes": "Unsupported Word extensions are retained as compressed raw OOXML when possible; exact package recovery is available for untouched generated counterparts."
     },
     {

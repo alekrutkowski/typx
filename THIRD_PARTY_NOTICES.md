@@ -10,4 +10,6 @@ The project refers to, but does not bundle, the following specifications and doc
 
 No font files, Microsoft Office binaries, LibreOffice binaries, Typst binaries, schemas, or third-party Python packages are redistributed in this repository.
 
+At conversion time, the DOCX-to-Typst path can copy font programs that are embedded in the user's DOCX or installed on the user's own system into that conversion's local asset directory. Those runtime-generated copies are user-controlled outputs, are not included in typx release/test archives, and remain subject to the font copyright holder's embedding and redistribution terms.
+
 Build and publication tooling referenced by the repository includes setuptools and official GitHub Actions. Those tools remain subject to their own licenses and are not redistributed as part of the dependency-free `typx.pyz` runtime.

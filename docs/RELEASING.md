@@ -40,7 +40,7 @@ On Windows, compare the two files with your preferred file or hash comparison to
 
 ```bash
 git add .
-git commit -m "Prepare typx 0.1.0"
+git commit -m "Prepare typx 0.3.2"
 git push origin main
 ```
 
@@ -48,23 +48,23 @@ Wait for the normal CI workflow to pass.
 
 ## 4. Tag the exact commit
 
-For version `0.1.0`:
+For version `0.3.2`:
 
 ```bash
-git tag -a v0.1.0 -m "typx 0.1.0"
-git push origin v0.1.0
+git tag -a v0.3.2 -m "typx 0.3.2"
+git push origin v0.3.2
 ```
 
-The release workflow checks that `v0.1.0` exactly matches the package version `0.1.0`. A mismatched tag fails before publication.
+The release workflow checks that `v0.3.2` exactly matches the package version `0.3.2`. A mismatched tag fails before publication.
 
 ## 5. What GitHub Actions publishes
 
 A successful tagged build publishes these assets:
 
 ```text
-typx-0.1.0.pyz
-typx-0.1.0-source.zip
-typx-0.1.0-bundle.zip
+typx-0.3.2.pyz
+typx-0.3.2-source.zip
+typx-0.3.2-bundle.zip
 SHA256SUMS.txt
 ```
 

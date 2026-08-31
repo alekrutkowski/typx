@@ -34,6 +34,7 @@ from .model import (
     Paragraph,
     ParagraphStyle,
     Quote,
+    Reference,
     RawBlock,
     RawInline,
     Resource,
@@ -93,6 +94,11 @@ class _ParseContext:
     paragraph_style: ParagraphStyle = field(default_factory=ParagraphStyle)
     variables: dict[str, Any] = field(default_factory=dict)
     heading_numbering: str | None = None
+    heading_supplement: str | None = None
+    figure_numbering: str | None = "1"
+    figure_supplement: str | None = None
+    equation_numbering: str | None = None
+    equation_supplement: str | None = None
     list_marker: str | None = None
     enum_numbering: str | None = None
 
@@ -102,6 +108,11 @@ class _ParseContext:
             paragraph_style=self.paragraph_style.copy(),
             variables=dict(self.variables),
             heading_numbering=self.heading_numbering,
+            heading_supplement=self.heading_supplement,
+            figure_numbering=self.figure_numbering,
+            figure_supplement=self.figure_supplement,
+            equation_numbering=self.equation_numbering,
+            equation_supplement=self.equation_supplement,
             list_marker=self.list_marker,
             enum_numbering=self.enum_numbering,
         )
@@ -362,6 +373,7 @@ class TypstReader:
         self.doc.blocks = self._parse_blocks(self.source, self.context)
         if not self.doc.sections:
             self.doc.sections = [SectionProperties()]
+        self._resolve_numbering_and_references()
         return self.doc
 
     # ---------- block parser ----------
@@ -419,7 +431,10 @@ class TypstReader:
                 while i < len(lines) and not lines[i].lstrip().startswith(fence):
                     content.append(lines[i]); i += 1
                 if i < len(lines): i += 1
-                blocks.append(CodeBlock("".join(content).rstrip("\n"), language))
+                raw_style = context.text_style.copy()
+                raw_style.font = "DejaVu Sans Mono"
+                raw_style.size_pt = 0.8 * (context.text_style.size_pt or 11.0)
+                blocks.append(CodeBlock("".join(content).rstrip("\n"), language, style=raw_style))
                 continue
             # Markup heading.
             heading_match = re.match(r"^(=+)\s+(.*?)(?:\n)?$", left, re.DOTALL)
@@ -427,8 +442,12 @@ class TypstReader:
                 flush_paragraph()
                 level = min(6, len(heading_match.group(1)))
                 body_text, label = self._extract_trailing_label(heading_match.group(2))
-                blocks.append(Heading(level, self._parse_inlines(body_text, context.text_style),
-                                      numbering=context.heading_numbering, label=label))
+                heading_style = context.text_style.copy()
+                if heading_style.size_pt is not None:
+                    heading_style.size_pt *= 1.4 if level == 1 else 1.2 if level == 2 else 1.0
+                blocks.append(Heading(level, self._parse_inlines(body_text, heading_style),
+                                      numbering=context.heading_numbering, label=label,
+                                      supplement=context.heading_supplement))
                 i += 1; continue
             # Markup lists and term lists.
             if re.match(r"^[-+]\s+", left) or re.match(r"^/\s+", left):
@@ -442,7 +461,9 @@ class TypstReader:
                 if is_display:
                     flush_paragraph()
                     body, label = self._extract_trailing_label(math_text)
-                    blocks.append(MathBlock(body.strip("$\n "), label=label))
+                    blocks.append(MathBlock(body.strip("$\n "), label=label,
+                                            numbering=context.equation_numbering,
+                                            supplement=context.equation_supplement))
                     i += consumed; continue
             # Top-level code expression.
             if left.startswith("#"):
@@ -467,6 +488,10 @@ class TypstReader:
 
     def _consume_math_block(self, lines: list[str], index: int) -> tuple[str, int, bool]:
         first = lines[index].strip()
+        single_line = re.match(r"^\$\s+(.*?)\s+\$\s*(<([A-Za-z0-9_.:-]+)>)?\s*$", first, re.DOTALL)
+        if single_line:
+            label = single_line.group(2) or ""
+            return single_line.group(1) + ((" " + label) if label else ""), 1, True
         if first.count("$") >= 2 and not (first.startswith("$ ") or first.endswith(" $")):
             return first, 1, False
         # A line consisting of '$', or opening '$ ' convention, is treated as display.
@@ -532,7 +557,11 @@ class TypstReader:
             if stack and stack[-1][0] == indent and stack[-1][1].ordered == ordered and bool(stack[-1][1].marker == "terms") == is_terms:
                 target = stack[-1][1]
             else:
-                target = ListBlock(ordered=ordered, marker="terms" if is_terms else context.list_marker)
+                target = ListBlock(
+                    ordered=ordered,
+                    marker="terms" if is_terms else context.list_marker,
+                    number_format=self._number_format_from_pattern(context.enum_numbering) if ordered else "decimal",
+                )
                 if not stack:
                     root = target
                 else:
@@ -540,12 +569,14 @@ class TypstReader:
                     if parent_item is not None:
                         parent_item.blocks.append(target)
                 stack.append((indent, target, None))
-            checked = None
-            checkbox = re.match(r"^\[([ xX])\]\s+(.*)$", content)
-            if checkbox:
-                checked = checkbox.group(1).lower() == "x"
-                content = checkbox.group(2)
-            item = ListItem([Paragraph(self._parse_inlines(content, context.text_style), context.paragraph_style.copy())], checked, term)
+            # Typst has no special Markdown-style task-list syntax.  A literal
+            # ``[x]`` or ``[ ]`` after a list marker is ordinary content and must
+            # remain ordinary text rather than being rewritten to checkbox glyphs.
+            item = ListItem(
+                [Paragraph(self._parse_inlines(content, context.text_style), context.paragraph_style.copy())],
+                None,
+                term,
+            )
             target.items.append(item)
             stack[-1] = (indent, target, item)
             i += 1
@@ -577,8 +608,15 @@ class TypstReader:
             body = expr.body or (expr.positional[-1] if expr.positional else "")
             level = 0 if name == "title" else parse_int(self._literal(expr.named.get("level", "1"), context), 1) or 1
             label = self._label_from_expr(expr)
-            return [Heading(level, self._parse_inlines(self._content_text(body), context.text_style),
-                            numbering=self._string_value(expr.named.get("numbering"), context), label=label,
+            heading_style = context.text_style.copy()
+            if heading_style.size_pt is not None:
+                heading_style.size_pt *= 1.7 if level == 0 else 1.4 if level == 1 else 1.2 if level == 2 else 1.0
+            return [Heading(level, self._parse_inlines(self._content_text(body), heading_style),
+                            numbering=(self._string_value(expr.named.get("numbering"), context)
+                                       if "numbering" in expr.named else context.heading_numbering),
+                            label=label,
+                            supplement=(self._string_value(expr.named.get("supplement"), context)
+                                        if "supplement" in expr.named else context.heading_supplement),
                             outlined=self._bool_value(expr.named.get("outlined"), True, context),
                             bookmarked=self._bool_value(expr.named.get("bookmarked"), True, context))]
         if name in {"table", "grid"}:
@@ -595,11 +633,20 @@ class TypstReader:
             text = self._string_value(expr.positional[0] if expr.positional else expr.body, context) or ""
             language = self._string_value(expr.named.get("lang"), context)
             block = self._bool_value(expr.named.get("block"), True, context)
-            return [CodeBlock(text, language, block)]
+            raw_style = context.text_style.copy()
+            raw_style.font = "DejaVu Sans Mono"
+            raw_style.size_pt = 0.8 * (context.text_style.size_pt or 11.0)
+            return [CodeBlock(text, language, block, style=raw_style)]
         if name in {"equation", "math.equation"}:
             body = expr.body or (expr.positional[0] if expr.positional else "")
-            return [MathBlock(self._content_text(body), numbering=self._string_value(expr.named.get("numbering"), context),
-                              label=self._label_from_expr(expr))]
+            return [MathBlock(
+                self._content_text(body),
+                numbering=(self._string_value(expr.named.get("numbering"), context)
+                           if "numbering" in expr.named else context.equation_numbering),
+                label=self._label_from_expr(expr),
+                supplement=(self._string_value(expr.named.get("supplement"), context)
+                            if "supplement" in expr.named else context.equation_supplement),
+            )]
         if name in {"list", "enum", "terms"}:
             return [self._parse_list_expression(expr, context)]
         if name in {"par", "align", "block", "box", "pad", "columns", "place", "rotate", "scale", "skew", "move"}:
@@ -654,17 +701,42 @@ class TypstReader:
                     if points is not None:
                         section.margin_top_pt = section.margin_right_pt = section.margin_bottom_pt = section.margin_left_pt = points
                 elif isinstance(parsed, dict):
+                    # Typst's x/y margin shorthands address both opposing sides;
+                    # explicit side values take precedence over the shorthand.
+                    if "x" in parsed:
+                        points = parse_typst_length(str(parsed["x"]))
+                        if points is not None:
+                            section.margin_left_pt = section.margin_right_pt = points
+                    if "y" in parsed:
+                        points = parse_typst_length(str(parsed["y"]))
+                        if points is not None:
+                            section.margin_top_pt = section.margin_bottom_pt = points
                     for key, attr_name in (("top", "margin_top_pt"), ("right", "margin_right_pt"),
-                                           ("bottom", "margin_bottom_pt"), ("left", "margin_left_pt"),
-                                           ("x", "margin_left_pt"), ("y", "margin_top_pt")):
+                                           ("bottom", "margin_bottom_pt"), ("left", "margin_left_pt")):
                         if key in parsed:
                             points = parse_typst_length(str(parsed[key]))
-                            if points is not None: setattr(section, attr_name, points)
+                            if points is not None:
+                                setattr(section, attr_name, points)
             columns = parse_int(self._literal(expr.named.get("columns", "1"), context), 1) or 1
             section.columns = columns
+            if "numbering" in expr.named:
+                section.page_numbering = self._string_value(expr.named.get("numbering"), context)
+                section.page_number_format = self._page_number_format(section.page_numbering)
+            if "number-align" in expr.named:
+                section.page_number_align = self._string_value(expr.named.get("number-align"), context)
             for key, attr_name in (("header", "header_default"), ("footer", "footer_default")):
                 if key in expr.named:
                     setattr(section, attr_name, self._parse_content_blocks(expr.named[key], context))
+            if self.doc.sections:
+                self.doc.sections[-1] = section
+            else:
+                self.doc.sections.append(section)
+        elif name == "columns":
+            section = self.doc.sections[-1] if self.doc.sections else SectionProperties()
+            gutter = parse_typst_length(expr.named.get("gutter"))
+            if gutter is not None:
+                section.column_spacing_pt = gutter
+                section.raw["typst_column_gutter_explicit"] = True
             if self.doc.sections:
                 self.doc.sections[-1] = section
             else:
@@ -674,7 +746,20 @@ class TypstReader:
         elif name == "par":
             context.paragraph_style = context.paragraph_style.merged(self._style_from_par_args(expr.named, context))
         elif name == "heading":
-            context.heading_numbering = self._string_value(expr.named.get("numbering"), context)
+            if "numbering" in expr.named:
+                context.heading_numbering = self._string_value(expr.named.get("numbering"), context)
+            if "supplement" in expr.named:
+                context.heading_supplement = self._string_value(expr.named.get("supplement"), context)
+        elif name == "figure":
+            if "numbering" in expr.named:
+                context.figure_numbering = self._string_value(expr.named.get("numbering"), context)
+            if "supplement" in expr.named:
+                context.figure_supplement = self._string_value(expr.named.get("supplement"), context)
+        elif name in {"equation", "math.equation"}:
+            if "numbering" in expr.named:
+                context.equation_numbering = self._string_value(expr.named.get("numbering"), context)
+            if "supplement" in expr.named:
+                context.equation_supplement = self._string_value(expr.named.get("supplement"), context)
         elif name == "list":
             context.list_marker = self._string_value(expr.named.get("marker"), context)
         elif name == "enum":
@@ -769,7 +854,9 @@ class TypstReader:
                 if end >= 0:
                     flush()
                     raw = source[i + fence_len:end]
-                    style = base_style.copy(); style.font = style.font or "Consolas"
+                    style = base_style.copy()
+                    style.font = "DejaVu Sans Mono"
+                    style.size_pt = 0.8 * (base_style.size_pt or 11.0)
                     result.append(RawInline("typst-raw", raw, [Text(raw, style)], "Typst raw text"))
                     i = end + fence_len; continue
             if ch == "$":
@@ -792,13 +879,19 @@ class TypstReader:
             if ch == "@":
                 match = re.match(r"@([A-Za-z0-9_.:-]+)", source[i:])
                 if match:
-                    flush(); label = match.group(1); end = i + match.end()
+                    flush(); label = match.group(1)
+                    # Full stops, commas, and sentence punctuation are not part of a
+                    # reference merely because labels may contain dots internally.
+                    trimmed = label.rstrip(".,;!?")
+                    if trimmed:
+                        label = trimmed
+                    end = i + 1 + len(label)
                     supplement = None
                     if end < len(source) and source[end] == "[":
                         close = _scan_balanced_with_comments(source, end, "[", "]")
                         supplement = source[end + 1:close - 1]; end = close
-                    children = self._parse_inlines(supplement, base_style, context) if supplement else [Text("@" + label, base_style.copy())]
-                    result.append(Link(label, children, anchor=True)); i = end; continue
+                    children = self._parse_inlines(supplement, base_style, context) if supplement is not None else []
+                    result.append(Reference(label, children, self._content_text(supplement) if supplement is not None else None)); i = end; continue
             if ch == "<":
                 match = re.match(r"<([A-Za-z0-9_.:-]+)>", source[i:])
                 if match:
@@ -855,13 +948,19 @@ class TypstReader:
             return NoteRef("footnote", note_id, note_body)
         if name in {"ref"}:
             target = self._string_value(expr.positional[0] if expr.positional else None, context) or ""
-            return Link(target.strip("<>"), body or [Text("@" + target.strip("<>"))], anchor=True)
+            supplement_raw = expr.named.get("supplement")
+            supplement = self._content_text(supplement_raw) if supplement_raw is not None else None
+            form = self._string_value(expr.named.get("form"), context) or "normal"
+            if form not in {"normal", "page"}: form = "normal"
+            return Reference(target.strip("<>"), body, supplement, form)
         if name == "cite":
             keys = [self._string_value(value, context) or value.strip("<>") for value in expr.positional]
             return Citation([key for key in keys if key], self._content_text(expr.named.get("supplement", "")) or None)
         if name == "raw":
             text = self._string_value(expr.positional[0] if expr.positional else body_raw, context) or ""
-            style = base_style.copy(); style.font = style.font or "Consolas"
+            style = base_style.copy()
+            style.font = "DejaVu Sans Mono"
+            style.size_pt = 0.8 * (base_style.size_pt or 11.0)
             return RawInline("typst-raw", text, [Text(text, style)], "Typst raw text")
         if name in {"box", "block", "align", "pad", "move", "place", "rotate", "scale", "skew", "hide"}:
             return body
@@ -926,21 +1025,54 @@ class TypstReader:
             if call and call.name in {"table.hline", "table.vline"}:
                 continue
             items.append((self._table_cell_from_value(value, context), False))
+        # Build logical rows while reserving columns occupied by row-spanning
+        # cells from earlier rows.  Counting only the current row's colspans
+        # places following cells one column too far to the right whenever a
+        # previous row contains ``rowspan`` (for example API/Worker groups in
+        # the complex-table regression fixture).
         rows: list[TableRow] = []
         row = TableRow()
-        occupied = 0
+        row_index = 0
+        cursor = 0
+        blocked_until = [0] * columns_count
+
+        def find_slot(start_col: int, span: int) -> int | None:
+            col = max(0, start_col)
+            while col + span <= columns_count:
+                if all(blocked_until[index] <= row_index for index in range(col, col + span)):
+                    return col
+                col += 1
+            return None
+
+        def advance_row() -> None:
+            nonlocal row, row_index, cursor
+            if row.cells:
+                rows.append(row)
+            row = TableRow()
+            row_index += 1
+            cursor = 0
+
         for cell, header in items:
-            span = max(1, cell.colspan)
-            if occupied and occupied + span > columns_count:
-                rows.append(row); row = TableRow(); occupied = 0
+            span = max(1, min(columns_count, cell.colspan))
+            slot = find_slot(cursor, span)
+            while slot is None:
+                advance_row()
+                slot = find_slot(0, span)
             cell.header = cell.header or header
             row.header = row.header or header
-            row.cells.append(cell); occupied += span
-            if occupied >= columns_count:
-                rows.append(row); row = TableRow(); occupied = 0
-        if row.cells: rows.append(row)
-        return Table(rows, column_widths, align=self._string_value(expr.named.get("align"), context),
-                     layout="fixed" if column_widths else "autofit")
+            row.cells.append(cell)
+            for col in range(slot, slot + span):
+                blocked_until[col] = max(blocked_until[col], row_index + max(1, cell.rowspan))
+            cursor = slot + span
+        if row.cells:
+            rows.append(row)
+        return Table(
+            rows,
+            column_widths,
+            align=self._string_value(expr.named.get("align"), context),
+            layout="fixed" if column_widths else "autofit",
+            raw={"typst_kind": expr.name},
+        )
 
     def _table_cell_from_value(self, value: str, context: _ParseContext,
                                header: bool = False) -> TableCell:
@@ -967,6 +1099,8 @@ class TypstReader:
         if body_expr and body_expr.name in {"image", "rect", "square", "circle", "ellipse", "line", "polygon", "curve"}:
             inline = self._parse_image_expression(body_expr, context) if body_expr.name == "image" else self._shape_to_image(body_expr, context)
             body = [Paragraph([inline])]
+        elif body_expr and body_expr.name in {"table", "grid"}:
+            body = [self._parse_table_expression(body_expr, context)]
         else:
             body = self._parse_content_blocks(body_raw, context)
         caption_raw = expr.named.get("caption", "")
@@ -975,10 +1109,12 @@ class TypstReader:
             caption=self._parse_inlines(self._content_text(caption_raw), context.text_style),
             kind_name=self._string_value(expr.named.get("kind"), context) or "figure",
             label=self._label_from_expr(expr),
-            numbering=self._string_value(expr.named.get("numbering"), context),
+            numbering=(self._string_value(expr.named.get("numbering"), context)
+                       if "numbering" in expr.named else context.figure_numbering),
             placement=self._string_value(expr.named.get("placement"), context),
             align=self._string_value(expr.named.get("align"), context),
-            supplement=self._string_value(expr.named.get("supplement"), context),
+            supplement=(self._string_value(expr.named.get("supplement"), context)
+                        if "supplement" in expr.named else context.figure_supplement),
         )
 
     def _parse_list_expression(self, expr: TypstExpression, context: _ParseContext) -> ListBlock:
@@ -992,8 +1128,15 @@ class TypstReader:
                 items.append(ListItem(self._parse_content_blocks(body, context), term=term))
             else:
                 items.append(ListItem(self._parse_content_blocks(value, context)))
-        return ListBlock(ordered, items, start=parse_int(self._literal(expr.named.get("start", "1"), context), 1) or 1,
-                         marker=self._string_value(expr.named.get("marker"), context))
+        numbering = (self._string_value(expr.named.get("numbering"), context)
+                     if "numbering" in expr.named else context.enum_numbering)
+        return ListBlock(
+            ordered,
+            items,
+            start=parse_int(self._literal(expr.named.get("start", "1"), context), 1) or 1,
+            number_format=self._number_format_from_pattern(numbering) if ordered else "decimal",
+            marker=self._string_value(expr.named.get("marker"), context),
+        )
 
     def _parse_layout_wrapper(self, expr: TypstExpression, context: _ParseContext) -> list[Block]:
         body_raw = expr.body or expr.named.get("body") or (expr.positional[-1] if expr.positional else "")
@@ -1012,9 +1155,19 @@ class TypstReader:
         if expr.name == "columns":
             count = parse_int(self._literal(expr.positional[0] if expr.positional else expr.named.get("count", "2"), context), 2) or 2
             section = self.doc.sections[-1] if self.doc.sections else SectionProperties()
-            new_section = SectionProperties(**{name: getattr(section, name) for name in section.__dataclass_fields__})
-            new_section.columns = count
-            return [BreakBlock("section", new_section), *blocks, BreakBlock("section", section)]
+            before = SectionProperties(**{name: getattr(section, name) for name in section.__dataclass_fields__})
+            columns_section = SectionProperties(**{name: getattr(section, name) for name in section.__dataclass_fields__})
+            before.section_type = "continuous"
+            columns_section.section_type = "continuous"
+            columns_section.columns = count
+            gutter = parse_typst_length(expr.named.get("gutter"))
+            if gutter is not None:
+                columns_section.column_spacing_pt = gutter
+                columns_section.raw["typst_column_gutter_explicit"] = True
+            # A paragraph-level w:sectPr describes the section that ends at that
+            # paragraph.  End the preceding one-column section first, then end the
+            # temporary multi-column section after its content.
+            return [BreakBlock("section", before), *blocks, BreakBlock("section", columns_section)]
         if expr.name in {"place", "rotate", "scale", "skew", "move"} and self.options.unknown == "preserve":
             return [self._raw_typst_block(expr.raw, blocks, f"Typst layout transform {expr.name}")]
         return blocks
@@ -1044,6 +1197,10 @@ class TypstReader:
         resource_id = "img-" + checksum[:16]
         media_type = guess_media_type(path_value, data)
         natural_w, natural_h = dimensions_points(data, media_type)
+        if width is not None and height is None and natural_w and natural_h:
+            height = width * natural_h / natural_w
+        elif height is not None and width is None and natural_w and natural_h:
+            width = height * natural_w / natural_h
         resource = Resource(resource_id, sanitize_filename(Path(path_value).name, "image"), media_type, data=data,
                             source_path=str(path), width_pt=width or natural_w, height_pt=height or natural_h,
                             alt_text=alt, checksum=checksum)
@@ -1088,6 +1245,174 @@ class TypstReader:
         data = self._string_value(expr.named.get("data"), context) or ""
         body = self._parse_content_blocks(expr.named.get("body") or expr.body or "", context)
         return [RawBlock(fmt, data, body, self._string_value(expr.named.get("description"), context))]
+
+    # ---------- counters and references ----------
+
+    def _resolve_numbering_and_references(self) -> None:
+        """Resolve the static counters that Typst would expose through references.
+
+        typx is deliberately a static transpiler rather than a Typst evaluator.  Still,
+        headings, figures, and equations use deterministic document-order counters in the
+        supported subset, so resolving their visible reference text here is both safer and
+        closer to Typst than copying ``@label`` literally into Word.
+        """
+        labels: dict[str, tuple[str, str | None, str | None]] = {}
+        heading_counts = [0] * 9
+        figure_counts: dict[str, int] = {}
+        equation_count = 0
+
+        for block in self.doc.walk_blocks():
+            if isinstance(block, Heading):
+                if block.numbering:
+                    level = max(1, min(len(heading_counts), block.level or 1))
+                    heading_counts[level - 1] += 1
+                    for index in range(level, len(heading_counts)):
+                        heading_counts[index] = 0
+                    active = heading_counts[:level]
+                    block.number_text = self._format_numbering_pattern(block.numbering, active)
+                if block.label:
+                    labels[block.label] = (
+                        block.supplement if block.supplement is not None else "Section",
+                        block.number_text,
+                        "heading",
+                    )
+            elif isinstance(block, Figure):
+                if block.numbering:
+                    key = block.kind_name or "figure"
+                    figure_counts[key] = figure_counts.get(key, 0) + 1
+                    block.number_text = self._format_numbering_pattern(block.numbering, [figure_counts[key]])
+                if block.label:
+                    default_supplement = "Table" if block.kind_name == "table" else "Figure"
+                    labels[block.label] = (
+                        block.supplement if block.supplement is not None else default_supplement,
+                        block.number_text,
+                        "figure",
+                    )
+            elif isinstance(block, MathBlock):
+                if block.numbering:
+                    equation_count += 1
+                    block.number_text = self._format_numbering_pattern(block.numbering, [equation_count])
+                if block.label:
+                    labels[block.label] = (
+                        block.supplement if block.supplement is not None else "Equation",
+                        block.number_text,
+                        "equation",
+                    )
+
+        def resolve_inlines(inlines: list[Inline]) -> None:
+            for inline in inlines:
+                if isinstance(inline, Reference):
+                    info = labels.get(inline.target)
+                    if inline.form == "page":
+                        # Word's PAGEREF field supplies the dynamic page number.  Keep a
+                        # deterministic cached value for renderers that do not update fields.
+                        if not inline.children:
+                            inline.children = [Text("1")]
+                        continue
+                    if not info:
+                        if not inline.children:
+                            inline.children = [Text("@" + inline.target)]
+                        self.doc.warnings.append(f"unresolved reference: <{inline.target}>")
+                        continue
+                    auto_supplement, number_text, kind = info
+                    if not number_text:
+                        if not inline.children:
+                            inline.children = [Text("@" + inline.target)]
+                        self.doc.warnings.append(f"reference target is not numbered: <{inline.target}>")
+                        continue
+                    supplement = inline.supplement if inline.supplement is not None else auto_supplement
+                    # Typst's normal heading references omit the punctuation suffix from
+                    # a heading numbering pattern.  For example, headings displayed as
+                    # ``1.`` under ``numbering: "1."`` are referenced as ``Section 1``.
+                    # Keep paired equation punctuation such as ``(1)`` intact.
+                    reference_number = re.sub(r"[.,:;]+$", "", number_text) if kind == "heading" else number_text
+                    label = f"{supplement} {reference_number}".strip() if supplement else reference_number
+                    inline.children = [Text(label)]
+                elif isinstance(inline, Link):
+                    resolve_inlines(inline.children)
+                elif isinstance(inline, Field):
+                    resolve_inlines(inline.children)
+                elif isinstance(inline, Citation):
+                    resolve_inlines(inline.fallback)
+                elif isinstance(inline, Change):
+                    resolve_inlines(inline.children)
+                elif isinstance(inline, RawInline):
+                    resolve_inlines(inline.fallback)
+
+        for block in self.doc.walk_blocks():
+            if isinstance(block, (Paragraph, Heading)):
+                resolve_inlines(block.inlines)
+            elif isinstance(block, Figure):
+                resolve_inlines(block.caption)
+            elif isinstance(block, Quote):
+                resolve_inlines(block.attribution)
+
+    @classmethod
+    def _format_numbering_pattern(cls, pattern: str, numbers: list[int]) -> str:
+        if not numbers:
+            return ""
+        symbols = list(re.finditer(r"[1aAiI]", pattern))
+        if not symbols:
+            return str(numbers[-1])
+        if len(symbols) == 1:
+            match = symbols[0]
+            prefix, suffix = pattern[:match.start()], pattern[match.end():]
+            token = match.group(0)
+            if len(numbers) == 1:
+                return prefix + cls._format_counter(numbers[0], token) + suffix
+            separator = suffix or "."
+            core = separator.join(cls._format_counter(value, token) for value in numbers)
+            return prefix + core + suffix
+        rendered = pattern
+        offset = 0
+        for index, match in enumerate(symbols[:len(numbers)]):
+            start, end = match.start() + offset, match.end() + offset
+            replacement = cls._format_counter(numbers[index], match.group(0))
+            rendered = rendered[:start] + replacement + rendered[end:]
+            offset += len(replacement) - (match.end() - match.start())
+        return rendered
+
+    @staticmethod
+    def _format_counter(value: int, token: str) -> str:
+        if token == "1":
+            return str(value)
+        if token in {"a", "A"}:
+            n = max(1, value)
+            letters = ""
+            while n:
+                n, remainder = divmod(n - 1, 26)
+                letters = chr(ord("a") + remainder) + letters
+            return letters.upper() if token == "A" else letters
+        if token in {"i", "I"}:
+            n = max(1, value)
+            pieces: list[str] = []
+            for number, roman in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+                                  (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+                                  (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
+                while n >= number:
+                    pieces.append(roman); n -= number
+            result = "".join(pieces)
+            return result if token == "I" else result.lower()
+        return str(value)
+
+    @staticmethod
+    def _page_number_format(pattern: str | None) -> str | None:
+        if not pattern:
+            return None
+        for token, fmt in (("I", "upperRoman"), ("i", "lowerRoman"),
+                           ("A", "upperLetter"), ("a", "lowerLetter"), ("1", "decimal")):
+            if token in pattern:
+                return fmt
+        return None
+
+    @staticmethod
+    def _number_format_from_pattern(pattern: str | None) -> str:
+        if not pattern:
+            return "decimal"
+        match = re.search(r"[1aAiI]", pattern)
+        token = match.group(0) if match else "1"
+        return {"1": "decimal", "a": "lowerLetter", "A": "upperLetter",
+                "i": "lowerRoman", "I": "upperRoman"}.get(token, "decimal")
 
     # ---------- literal/style helpers ----------
 

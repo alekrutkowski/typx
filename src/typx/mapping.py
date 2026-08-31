@@ -135,8 +135,8 @@ _add("Document model", "footnote", "element", "w:footnoteReference and footnotes
 _add("Document model", "endnote", "conceptual extension", "w:endnoteReference and endnotes part", "word/endnotes.xml", "high", "exact", "full", "full", "Typst has native footnotes but no distinct endnote primitive; endnotes use preservation wrappers on the Typst side.")
 _add("Document model", "ref", "element", "REF, PAGEREF, NOTEREF field", "word/document.xml", "high", "high", "full", "full", "Reference form selects field code or hyperlink.")
 _add("Document model", "link", "element", "w:hyperlink", "word/document.xml + relationships", "exact", "exact", "full", "full", "Tooltip and internal/external targets are retained.")
-_add("Document model", "bibliography", "element", "bibliography sources, CITATION/BIBLIOGRAPHY fields, or static paragraphs", "word/bibliography.xml / document.xml", "approximate", "approximate", "partial", "partial", "CSL processing and Word bibliography engines differ. Citation keys and visible fallback are retained.")
-_add("Document model", "cite", "element", "CITATION field", "word/document.xml", "high", "high", "full", "partial", "Multiple keys and supplements are mapped to field switches where possible.")
+_add("Document model", "bibliography", "element", "bibliography sources plus CITATION/BIBLIOGRAPHY fields or static paragraphs", "customXml bibliography source store + word/document.xml", "approximate", "high", "partial", "full", "Word bibliography source records are converted to BibLaTeX and common Word styles map to Typst built-ins; grouped/unsupported field variants retain cached visible fallback.")
+_add("Document model", "cite", "element", "CITATION field", "word/document.xml", "high", "high", "full", "full", "Single-source Word citations map to native Typst cite calls including page supplements; grouped Word citations preserve cached combined display while registering each source invisibly.")
 _add("Document model", "numbering", "function", "w:numFmt / w:lvlText / field switches", "numbering.xml / document.xml", "high", "high", "partial", "partial", "Common Arabic, alphabetic, Roman, ordinal, and custom patterns are supported.")
 _add("Document model", "list", "element", "numbering definition with bullet format", "numbering.xml", "high", "high", "full", "full", "Marker alignment/layout properties are approximated by indents and tabs.")
 _add("Document model", "enum", "element", "numbering definition with numeric format", "numbering.xml", "high", "high", "full", "full", "Nested numbering and starts are supported.")
@@ -477,12 +477,12 @@ _docx_only = [
     ("macros in DOCM", "no `.docx` counterpart", "none", "none"),
     ("OMML equations", "Typst math", "high", "full"),
     ("mail merge settings/data source", "no direct counterpart", "preserve", "preserve"),
-    ("bibliography sources", "bibliography/cite", "approximate", "partial"),
+    ("bibliography sources", "bibliography/cite + generated BibLaTeX asset", "high", "full"),
     ("glossary document/building blocks", "include/template source", "preserve", "preserve"),
     ("document variables", "metadata/state", "approximate", "partial"),
     ("web settings", "no direct counterpart", "preserve", "preserve"),
     ("printer settings", "no direct counterpart", "preserve", "preserve"),
-    ("embedded fonts/font obfuscation", "font reference only", "preserve", "preserve"),
+    ("embedded fonts/font obfuscation", "project font assets + font-family reference", "high", "full"),
     ("digital signatures", "no semantic counterpart", "none", "none"),
     ("IRM/encryption", "outside unencrypted DOCX model", "none", "none"),
     ("MCE AlternateContent", "selected fallback plus raw OOXML", "preserve", "full"),
@@ -548,7 +548,7 @@ _docx_only = [
     ("commentsExtended.xml/commentsExtensible.xml/commentsIds.xml", "comment threading/resolution metadata", "approximate", "partial"),
     ("people.xml author identities", "comment/revision author metadata", "approximate", "partial"),
     ("stylesWithEffects.xml", "text/paragraph style effects", "preserve", "preserve"),
-    ("bibliography.xml source records", "bibliography/citation keys and metadata", "approximate", "partial"),
+    ("customXml bibliography source records", "BibLaTeX bibliography/citation keys and metadata", "high", "full"),
     ("ink/inkML parts", "image or raw drawing payload", "preserve", "preserve"),
     ("ActiveX controls and control properties", "raw embedded object/content-control fallback", "preserve", "preserve"),
     ("customUI/ribbon parts", "no document-semantic counterpart", "none", "none"),

@@ -195,6 +195,7 @@ def _convert_typst_to_docx(args: argparse.Namespace, source: Path, output: Path)
         preserve_comments=not args.no_comments,
         preserve_revisions=args.revisions == "preserve",
         embed_typst_source=args.roundtrip != "off" and not args.no_embed,
+        update_fields=args.update_fields,
         missing_assets="error" if args.missing_assets == "error" else "placeholder",
     )
     data = DocxWriter(document, writer_options).build()
@@ -378,6 +379,85 @@ def command_inspect(args: argparse.Namespace) -> int:
     return 0
 
 
+_WML_SEQUENCE_RULES: dict[str, tuple[str, ...]] = {
+    "pPr": (
+        "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl",
+        "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens",
+        "kinsoku", "wordWrap", "overflowPunct", "topLinePunct", "autoSpaceDE", "autoSpaceDN",
+        "bidi", "adjustRightInd", "snapToGrid", "spacing", "ind", "contextualSpacing",
+        "mirrorIndents", "suppressOverlap", "jc", "textDirection", "textAlignment",
+        "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr", "pPrChange",
+    ),
+    "rPr": (
+        "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
+        "dstrike", "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid",
+        "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz", "szCs",
+        "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs",
+        "em", "lang", "eastAsianLayout", "specVanish", "oMath", "rPrChange",
+    ),
+    "style": (
+        "name", "aliases", "basedOn", "next", "link", "autoRedefine", "hidden", "uiPriority",
+        "semiHidden", "unhideWhenUsed", "qFormat", "locked", "personal", "personalCompose",
+        "personalReply", "rsid", "pPr", "rPr", "tblPr", "trPr", "tcPr", "tblStylePr",
+    ),
+    "sectPr": (
+        "headerReference", "footerReference", "footnotePr", "endnotePr", "type", "pgSz",
+        "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols", "formProt",
+        "vAlign", "noEndnote", "titlePg", "textDirection", "bidi", "rtlGutter", "docGrid",
+        "printerSettings", "sectPrChange",
+    ),
+    "lvl": (
+        "start", "numFmt", "lvlRestart", "pStyle", "isLgl", "suff", "lvlText",
+        "lvlPicBulletId", "legacy", "lvlJc", "pPr", "rPr",
+    ),
+}
+
+
+def _wordprocessing_sequence_errors(part_name: str, root: ET.Element) -> list[str]:
+    errors: list[str] = []
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    prefix = "{" + w_ns + "}"
+    for element in root.iter():
+        if not element.tag.startswith(prefix):
+            continue
+        local = element.tag[len(prefix):]
+        order = _WML_SEQUENCE_RULES.get(local)
+        if order is None:
+            continue
+        rank = {name: index for index, name in enumerate(order)}
+        known = [
+            child.tag[len(prefix):]
+            for child in element
+            if child.tag.startswith(prefix) and child.tag[len(prefix):] in rank
+        ]
+        positions = [rank[name] for name in known]
+        if positions != sorted(positions):
+            errors.append(
+                f"schema-order violation in /{part_name}: w:{local} children are "
+                + ", ".join(f"w:{name}" for name in known)
+            )
+    return errors
+
+
+def _theme_matrix_errors(part_name: str, root: ET.Element) -> list[str]:
+    a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    if root.tag != f"{a}theme":
+        return []
+    errors: list[str] = []
+    fmt = root.find(f"{a}themeElements/{a}fmtScheme")
+    if fmt is None:
+        return [f"missing a:fmtScheme in /{part_name}"]
+    for name in ("fillStyleLst", "lnStyleLst", "effectStyleLst", "bgFillStyleLst"):
+        item = fmt.find(f"{a}{name}")
+        if item is None:
+            errors.append(f"missing a:{name} in /{part_name}")
+        elif len(item) != 3:
+            errors.append(
+                f"invalid a:{name} in /{part_name}: expected 3 style entries, found {len(item)}"
+            )
+    return errors
+
+
 def _validate_docx(path: Path, deep: bool) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -392,7 +472,11 @@ def _validate_docx(path: Path, deep: bool) -> dict[str, Any]:
     for name, data in package.parts.items():
         if name.lower().endswith((".xml", ".rels")) or name == "[Content_Types].xml":
             try:
-                ET.fromstring(data)
+                root = ET.fromstring(data)
+                if name.startswith("word/") and name.lower().endswith(".xml"):
+                    errors.extend(_wordprocessing_sequence_errors(name, root))
+                if name.startswith("word/theme/") and name.lower().endswith(".xml"):
+                    errors.extend(_theme_matrix_errors(name, root))
             except ET.ParseError as exc:
                 errors.append(f"malformed XML in /{name}: {exc}")
 
@@ -656,6 +740,11 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument("--no-includes", action="store_true", help="do not resolve static Typst include statements")
     convert.add_argument("--no-comments", action="store_true", help="drop Word comments and converter comment metadata")
     convert.add_argument("--no-embed", action="store_true", help="do not embed the source counterpart for later exact recovery")
+    convert.add_argument(
+        "--update-fields",
+        action="store_true",
+        help="ask Word to recalculate document fields on open (disabled by default to avoid external-field prompts)",
+    )
     convert.add_argument("--missing-assets", choices=("placeholder", "error"), default="placeholder")
     convert.add_argument("--force", action="store_true", help="replace an existing output file")
     convert.add_argument("--json", action="store_true", help="emit a machine-readable result")

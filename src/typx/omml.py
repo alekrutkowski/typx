@@ -64,16 +64,51 @@ def _typst_symbol_text(text: str) -> str:
     return "".join(chunks).strip()
 
 
+def _quote_word_identifiers(text: str) -> str:
+    """Make multi-letter OMML identifiers valid Typst math text.
+
+    Word OMML does not reliably distinguish a run such as ``MTBF`` from a
+    sequence of one-letter variables.  Bare multi-letter identifiers are
+    interpreted by Typst as variable/function names and can therefore fail
+    with ``Unknown variable``.  Treat a contiguous multi-letter Word math run
+    as literal math text.  Function-name containers are handled separately.
+    """
+    def convert_plain(segment: str) -> str:
+        return re.sub(
+            r"(?<![A-Za-z])[A-Za-z]{2,}(?![A-Za-z])",
+            lambda match: '"' + match.group(0).replace('\\', '\\\\').replace('"', '\\"') + '"',
+            segment,
+        )
+
+    chunks: list[str] = []
+    plain: list[str] = []
+    for char in text:
+        mapped = UNICODE_TO_TYPST.get(char)
+        if mapped:
+            if plain:
+                chunks.append(convert_plain("".join(plain)))
+                plain.clear()
+            chunks.append(" " + mapped + " ")
+        else:
+            plain.append(char)
+    if plain:
+        chunks.append(convert_plain("".join(plain)))
+    return "".join(chunks).strip()
+
+
 def omml_to_typst(element: ET.Element | None) -> str:
     if element is None:
         return ""
     tag = local_name(element.tag)
     if tag in {"oMath", "oMathPara", "e", "num", "den", "sub", "sup", "deg",
-               "fName", "lim", "mr", "mc", "box", "borderBox"}:
+               "lim", "mr", "mc", "box", "borderBox"}:
         return " ".join(filter(None, (omml_to_typst(item) for item in element))).strip()
+    if tag == "fName":
+        # Named functions such as sin/log must stay identifiers in Typst.
+        return _typst_symbol_text("".join(element.itertext()))
     if tag in {"r", "t"}:
         text = "".join(element.itertext()) if tag == "r" else (element.text or "")
-        return _typst_symbol_text(text)
+        return _quote_word_identifiers(text)
     if tag == "f":
         numerator = omml_to_typst(child(element, "num", "m"))
         denominator = omml_to_typst(child(element, "den", "m"))

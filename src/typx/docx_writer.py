@@ -44,9 +44,11 @@ from .model import (
     Quote,
     RawBlock,
     RawInline,
+    Reference,
     Resource,
     SectionProperties,
     StyleDefinition,
+    TabStop,
     Table,
     TableCell,
     TableRow,
@@ -79,7 +81,7 @@ class DocxWriteOptions:
     preserve_comments: bool = True
     preserve_revisions: bool = True
     embed_typst_source: bool = True
-    update_fields: bool = True
+    update_fields: bool = False
     compatibility_mode: int = 15
     application_name: str = "typx"
     creator: str = ""
@@ -94,6 +96,63 @@ class _NumberingSpec:
     start: int
     number_format: str
     marker: str | None
+
+
+# WordprocessingML property containers use sequence-based content models.  Word is
+# less forgiving than general XML parsers when children are emitted out of schema
+# order, and can repair otherwise well-formed DOCX files as "unreadable content".
+_PPR_ORDER = (
+    "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr", "widowControl",
+    "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs", "suppressAutoHyphens",
+    "kinsoku", "wordWrap", "overflowPunct", "topLinePunct", "autoSpaceDE", "autoSpaceDN",
+    "bidi", "adjustRightInd", "snapToGrid", "spacing", "ind", "contextualSpacing",
+    "mirrorIndents", "suppressOverlap", "jc", "textDirection", "textAlignment",
+    "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr", "pPrChange",
+)
+_RPR_ORDER = (
+    "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "strike",
+    "dstrike", "outline", "shadow", "emboss", "imprint", "noProof", "snapToGrid",
+    "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz", "szCs",
+    "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign", "rtl", "cs",
+    "em", "lang", "eastAsianLayout", "specVanish", "oMath", "rPrChange",
+)
+_STYLE_ORDER = (
+    "name", "aliases", "basedOn", "next", "link", "autoRedefine", "hidden", "uiPriority",
+    "semiHidden", "unhideWhenUsed", "qFormat", "locked", "personal", "personalCompose",
+    "personalReply", "rsid", "pPr", "rPr", "tblPr", "trPr", "tcPr", "tblStylePr",
+)
+_SECTPR_ORDER = (
+    "headerReference", "footerReference", "footnotePr", "endnotePr", "type", "pgSz",
+    "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType", "cols", "formProt",
+    "vAlign", "noEndnote", "titlePg", "textDirection", "bidi", "rtlGutter", "docGrid",
+    "printerSettings", "sectPrChange",
+)
+
+
+# Typst 0.15.1 defaults mapped to the closest WordprocessingML equivalents.
+# Word's paragraph spacing and line boxes are not identical to Typst's conceptual
+# cap-height/baseline model, so the vertical metrics below are calibrated rather
+# than copied one-for-one.
+_TYPST_BODY_FONT = "Libertinus Serif"
+_TYPST_MONO_FONT = "DejaVu Sans Mono"
+_TYPST_BODY_SIZE_PT = 11.0
+# Word's exact line-spacing mode clips tall inline objects to the line box.
+# Typst's default leading is font-driven and must expand around images/shapes, so
+# use Word's automatic single-line spacing and only a small after-paragraph gap.
+_TYPST_WORD_LINE_SPACING = 1.0
+_TYPST_WORD_PAR_AFTER_PT = 3.0
+_TYPST_FIGURE_GAP_PT = 7.15       # 0.65em at 11pt
+_TYPST_TABLE_INSET_PT = 5.0
+
+
+def _order_word_children(element: ET.Element, order: tuple[str, ...]) -> ET.Element:
+    rank = {qn("w", name): index for index, name in enumerate(order)}
+    original = list(element)
+    element[:] = sorted(
+        original,
+        key=lambda item: (rank.get(item.tag, len(rank)), original.index(item)),
+    )
+    return element
 
 
 class DocxWriter:
@@ -287,7 +346,7 @@ class DocxWriter:
         self.builder.add_part("word/settings.xml", root, CONTENT_TYPES["settings"])
 
     def _add_font_table(self) -> None:
-        fonts: set[str] = {"Aptos", "Calibri", "Cambria", "Courier New"}
+        fonts: set[str] = {_TYPST_BODY_FONT, _TYPST_MONO_FONT}
         for style in self.doc.styles.values():
             for name in (style.text.font, style.text.font_east_asia, style.text.font_complex,
                          style.paragraph.default_text_style.font):
@@ -302,16 +361,25 @@ class DocxWriter:
         root = ET.Element(qn("w", "fonts"))
         for name in sorted(fonts):
             font = ET.SubElement(root, qn("w", "font"), {qn("w", "name"): name})
+            # Word consults altName before metric-based substitution when the
+            # requested font is unavailable. This keeps code monospaced on a
+            # stock Windows installation without embedding third-party fonts.
+            if name == _TYPST_MONO_FONT:
+                ET.SubElement(font, qn("w", "altName"), {qn("w", "val"): "Consolas"})
+            elif name == _TYPST_BODY_FONT:
+                ET.SubElement(font, qn("w", "altName"), {qn("w", "val"): "Palatino Linotype"})
             ET.SubElement(font, qn("w", "charset"), {qn("w", "val"): "00"})
-            ET.SubElement(font, qn("w", "family"), {qn("w", "val"): "swiss" if name != "Courier New" else "modern"})
-            ET.SubElement(font, qn("w", "pitch"), {qn("w", "val"): "variable" if name != "Courier New" else "fixed"})
+            is_mono = name == _TYPST_MONO_FONT
+            is_serif = name == _TYPST_BODY_FONT
+            ET.SubElement(font, qn("w", "family"), {qn("w", "val"): "modern" if is_mono else "roman" if is_serif else "auto"})
+            ET.SubElement(font, qn("w", "pitch"), {qn("w", "val"): "fixed" if is_mono else "variable"})
         self.builder.add_part("word/fontTable.xml", root, CONTENT_TYPES["font_table"])
 
     def _add_theme(self) -> None:
         # Compact but complete DrawingML theme. Word uses this for theme colors and fonts.
-        theme = ET.Element(qn("a", "theme"), {"name": "typx"})
+        theme = ET.Element(qn("a", "theme"), {"name": "typx Typst"})
         elements = ET.SubElement(theme, qn("a", "themeElements"))
-        scheme = ET.SubElement(elements, qn("a", "clrScheme"), {"name": "typx"})
+        scheme = ET.SubElement(elements, qn("a", "clrScheme"), {"name": "typx Typst"})
         colors = {
             "dk1": ("sysClr", {"val": "windowText", "lastClr": "000000"}),
             "lt1": ("sysClr", {"val": "window", "lastClr": "FFFFFF"}),
@@ -319,20 +387,46 @@ class DocxWriter:
             "accent1": ("srgbClr", {"val": "4472C4"}), "accent2": ("srgbClr", {"val": "ED7D31"}),
             "accent3": ("srgbClr", {"val": "A5A5A5"}), "accent4": ("srgbClr", {"val": "FFC000"}),
             "accent5": ("srgbClr", {"val": "5B9BD5"}), "accent6": ("srgbClr", {"val": "70AD47"}),
-            "hlink": ("srgbClr", {"val": "0563C1"}), "folHlink": ("srgbClr", {"val": "954F72"}),
+            # Typst links are visually indistinguishable from surrounding text by default.
+            "hlink": ("srgbClr", {"val": "000000"}), "folHlink": ("srgbClr", {"val": "000000"}),
         }
         for key, (tag, attrs) in colors.items():
             container = ET.SubElement(scheme, qn("a", key))
             ET.SubElement(container, qn("a", tag), attrs)
-        fonts = ET.SubElement(elements, qn("a", "fontScheme"), {"name": "typx"})
-        for kind, latin in (("majorFont", "Aptos Display"), ("minorFont", "Aptos")):
+        fonts = ET.SubElement(elements, qn("a", "fontScheme"), {"name": "typx Typst"})
+        for kind, latin in (("majorFont", _TYPST_BODY_FONT), ("minorFont", _TYPST_BODY_FONT)):
             item = ET.SubElement(fonts, qn("a", kind))
             ET.SubElement(item, qn("a", "latin"), {"typeface": latin})
             ET.SubElement(item, qn("a", "ea"), {"typeface": ""})
             ET.SubElement(item, qn("a", "cs"), {"typeface": ""})
-        fmt = ET.SubElement(elements, qn("a", "fmtScheme"), {"name": "typx"})
-        for list_name in ("fillStyleLst", "lnStyleLst", "effectStyleLst", "bgFillStyleLst"):
-            ET.SubElement(fmt, qn("a", list_name))
+        fmt = ET.SubElement(elements, qn("a", "fmtScheme"), {"name": "typx Typst"})
+
+        # DrawingML theme style matrices contain three entries at each intensity
+        # level.  Empty style lists are not interoperable with desktop Word.
+        fills = ET.SubElement(fmt, qn("a", "fillStyleLst"))
+        for _ in range(3):
+            fill = ET.SubElement(fills, qn("a", "solidFill"))
+            ET.SubElement(fill, qn("a", "schemeClr"), {"val": "phClr"})
+
+        lines = ET.SubElement(fmt, qn("a", "lnStyleLst"))
+        for width in (9525, 25400, 38100):
+            line = ET.SubElement(lines, qn("a", "ln"), {
+                "w": str(width), "cap": "flat", "cmpd": "sng", "algn": "ctr",
+            })
+            fill = ET.SubElement(line, qn("a", "solidFill"))
+            ET.SubElement(fill, qn("a", "schemeClr"), {"val": "phClr"})
+            ET.SubElement(line, qn("a", "prstDash"), {"val": "solid"})
+
+        effects = ET.SubElement(fmt, qn("a", "effectStyleLst"))
+        for _ in range(3):
+            effect = ET.SubElement(effects, qn("a", "effectStyle"))
+            ET.SubElement(effect, qn("a", "effectLst"))
+
+        backgrounds = ET.SubElement(fmt, qn("a", "bgFillStyleLst"))
+        for _ in range(3):
+            fill = ET.SubElement(backgrounds, qn("a", "solidFill"))
+            ET.SubElement(fill, qn("a", "schemeClr"), {"val": "phClr"})
+
         ET.SubElement(theme, qn("a", "objectDefaults"))
         ET.SubElement(theme, qn("a", "extraClrSchemeLst"))
         self.builder.add_part("word/theme/theme1.xml", theme, CONTENT_TYPES["theme"])
@@ -344,30 +438,68 @@ class DocxWriter:
         defaults = ET.SubElement(root, qn("w", "docDefaults"))
         rpr_default = ET.SubElement(ET.SubElement(defaults, qn("w", "rPrDefault")), qn("w", "rPr"))
         ET.SubElement(rpr_default, qn("w", "rFonts"), {
-            qn("w", "asciiTheme"): "minorHAnsi", qn("w", "hAnsiTheme"): "minorHAnsi",
-            qn("w", "eastAsiaTheme"): "minorEastAsia", qn("w", "cstheme"): "minorBidi",
+            qn("w", "ascii"): _TYPST_BODY_FONT, qn("w", "hAnsi"): _TYPST_BODY_FONT,
         })
+        ET.SubElement(rpr_default, qn("w", "color"), {qn("w", "val"): "000000"})
         ET.SubElement(rpr_default, qn("w", "sz"), {qn("w", "val"): "22"})
         ET.SubElement(rpr_default, qn("w", "szCs"), {qn("w", "val"): "22"})
         ppr_default = ET.SubElement(ET.SubElement(defaults, qn("w", "pPrDefault")), qn("w", "pPr"))
-        ET.SubElement(ppr_default, qn("w", "spacing"), {qn("w", "after"): "160", qn("w", "line"): "259", qn("w", "lineRule"): "auto"})
+        ET.SubElement(ppr_default, qn("w", "spacing"), {
+            qn("w", "after"): str(points_to_twips(_TYPST_WORD_PAR_AFTER_PT) or 60),
+            qn("w", "line"): "240",
+            qn("w", "lineRule"): "auto",
+        })
 
+        # Typst uses the same serif face for body text and headings. Heading
+        # scale/spacing comes from typst-library's HeadingElem show-set rule:
+        # level 1 = 1.4em, level 2 = 1.2em, deeper = 1em; all are bold.
         builtins: list[tuple[str, str, str, str | None, TextStyle, ParagraphStyle]] = [
-            ("Normal", "Normal", "paragraph", None, TextStyle(size_pt=11), ParagraphStyle()),
-            ("Title", "Title", "paragraph", "Normal", TextStyle(size_pt=26, bold=True, color="1F1F1F"), ParagraphStyle(space_after_pt=12, outline_level=0)),
-            ("Subtitle", "Subtitle", "paragraph", "Normal", TextStyle(size_pt=15, italic=True, color="595959"), ParagraphStyle(space_after_pt=10)),
-            ("Quote", "Quote", "paragraph", "Normal", TextStyle(italic=True, color="404040"), ParagraphStyle(left_indent_pt=36, right_indent_pt=36, space_before_pt=6, space_after_pt=6)),
-            ("Caption", "Caption", "paragraph", "Normal", TextStyle(size_pt=9, italic=True, color="404040"), ParagraphStyle(space_before_pt=6, space_after_pt=6)),
-            ("Code", "Code", "paragraph", "Normal", TextStyle(font="Courier New", size_pt=9), ParagraphStyle(left_indent_pt=18, right_indent_pt=18, shading="F2F2F2", space_before_pt=6, space_after_pt=6)),
-            ("ListParagraph", "List Paragraph", "paragraph", "Normal", TextStyle(), ParagraphStyle(left_indent_pt=36)),
-            ("Hyperlink", "Hyperlink", "character", None, TextStyle(color="0563C1", underline="single"), ParagraphStyle()),
+            ("Normal", "Normal", "paragraph", None,
+             TextStyle(font=_TYPST_BODY_FONT, size_pt=_TYPST_BODY_SIZE_PT, color="000000"),
+             ParagraphStyle(space_after_pt=_TYPST_WORD_PAR_AFTER_PT,
+                            line_spacing=_TYPST_WORD_LINE_SPACING, line_spacing_rule="auto")),
+            ("Title", "Title", "paragraph", "Normal",
+             TextStyle(font=_TYPST_BODY_FONT, size_pt=18.7, bold=True, color="000000"),
+             ParagraphStyle(space_before_pt=21.04, space_after_pt=8.25,
+                            line_spacing=_TYPST_WORD_LINE_SPACING, line_spacing_rule="auto", keep_next=True, outline_level=0)),
+            ("Subtitle", "Subtitle", "paragraph", "Normal",
+             TextStyle(font=_TYPST_BODY_FONT, size_pt=_TYPST_BODY_SIZE_PT, italic=True, color="000000"),
+             ParagraphStyle(space_after_pt=_TYPST_WORD_PAR_AFTER_PT,
+                            line_spacing=_TYPST_WORD_LINE_SPACING, line_spacing_rule="auto")),
+            ("Quote", "Quote", "paragraph", "Normal", TextStyle(),
+             ParagraphStyle(left_indent_pt=11, right_indent_pt=11)),
+            ("Caption", "Caption", "paragraph", "Normal",
+             TextStyle(font=_TYPST_BODY_FONT, size_pt=_TYPST_BODY_SIZE_PT, color="000000"),
+             ParagraphStyle(space_before_pt=_TYPST_FIGURE_GAP_PT,
+                            space_after_pt=_TYPST_WORD_PAR_AFTER_PT,
+                            line_spacing=_TYPST_WORD_LINE_SPACING, line_spacing_rule="auto")),
+            ("Code", "Code", "paragraph", "Normal",
+             TextStyle(font=_TYPST_MONO_FONT, size_pt=8.8, color="000000"),
+             ParagraphStyle(space_after_pt=_TYPST_WORD_PAR_AFTER_PT,
+                            line_spacing=_TYPST_WORD_LINE_SPACING, line_spacing_rule="auto")),
+            # Numbering definitions own indentation; top-level markers start on
+            # the ordinary text margin, like Typst's list/enum indent: 0pt.
+            ("ListParagraph", "List Paragraph", "paragraph", "Normal", TextStyle(), ParagraphStyle()),
+            ("Hyperlink", "Hyperlink", "character", None, TextStyle(), ParagraphStyle()),
+            ("FootnoteReference", "footnote reference", "character", None,
+             TextStyle(superscript=True), ParagraphStyle()),
+            ("EndnoteReference", "endnote reference", "character", None,
+             TextStyle(superscript=True), ParagraphStyle()),
         ]
         for level in range(1, 10):
-            size = max(11.0, 20.0 - (level - 1) * 1.25)
-            builtins.append((f"Heading{level}", f"heading {level}", "paragraph", "Normal",
-                             TextStyle(size_pt=size, bold=True, color="2F5496"),
-                             ParagraphStyle(space_before_pt=10 if level == 1 else 6, space_after_pt=4,
-                                            keep_next=True, outline_level=level - 1)))
+            if level == 1:
+                size, before = 15.4, 19.8
+            elif level == 2:
+                size, before = 13.2, 15.84
+            else:
+                size, before = 11.0, 15.84
+            builtins.append((
+                f"Heading{level}", f"heading {level}", "paragraph", "Normal",
+                TextStyle(font=_TYPST_BODY_FONT, size_pt=size, bold=True, color="000000"),
+                ParagraphStyle(space_before_pt=before, space_after_pt=8.25,
+                               line_spacing=_TYPST_WORD_LINE_SPACING, line_spacing_rule="auto",
+                               keep_next=True, outline_level=level - 1),
+            ))
         emitted: set[str] = set()
         for style_id, name, kind, based, text, paragraph in builtins:
             self._append_style(root, StyleDefinition(style_id, name, kind, based_on=based,
@@ -409,6 +541,7 @@ class DocxWriter:
             rpr = self._run_properties(style.text)
             if len(rpr):
                 element.append(rpr)
+        _order_word_children(element, _STYLE_ORDER)
 
     def _register_lists(self, blocks: Iterable[Block]) -> None:
         for block in blocks:
@@ -440,7 +573,16 @@ class DocxWriter:
         root = ET.Element(qn("w", "numbering"))
         for spec in self._numberings:
             abstract = ET.SubElement(root, qn("w", "abstractNum"), {qn("w", "abstractNumId"): str(spec.abstract_id)})
+            # Give each independent Typst list a distinct deterministic template
+            # identity.  Desktop Word can otherwise normalize visually similar
+            # abstract numbering definitions together when opening the package,
+            # which risks leaking one list's number format into another.
+            identity = hashlib.sha256(
+                f"typx-list:{spec.abstract_id}:{spec.ordered}:{spec.start}:{spec.number_format}:{spec.marker or ''}".encode("utf-8")
+            ).hexdigest()[:8].upper()
+            ET.SubElement(abstract, qn("w", "nsid"), {qn("w", "val"): identity})
             ET.SubElement(abstract, qn("w", "multiLevelType"), {qn("w", "val"): "hybridMultilevel"})
+            ET.SubElement(abstract, qn("w", "tmpl"), {qn("w", "val"): identity})
             for level in range(9):
                 lvl = ET.SubElement(abstract, qn("w", "lvl"), {qn("w", "ilvl"): str(level)})
                 ET.SubElement(lvl, qn("w", "start"), {qn("w", "val"): str(spec.start if level == 0 else 1)})
@@ -448,23 +590,40 @@ class DocxWriter:
                     fmt = self._num_format(spec.number_format, level)
                     pattern = self._number_pattern(fmt, level)
                     ET.SubElement(lvl, qn("w", "numFmt"), {qn("w", "val"): fmt})
+                    ET.SubElement(lvl, qn("w", "suff"), {qn("w", "val"): "tab"})
                     ET.SubElement(lvl, qn("w", "lvlText"), {qn("w", "val"): pattern})
                 else:
+                    # Keep bullets as Unicode in the document's normal font.  The previous
+                    # implementation paired Unicode bullets such as U+2022 with the legacy
+                    # Symbol font, where Word expects private-use Symbol code points instead.
+                    # That combination renders as missing-glyph rectangles in desktop Word.
                     bullets = [spec.marker or "•", "◦", "▪", "•", "◦", "▪", "•", "◦", "▪"]
                     ET.SubElement(lvl, qn("w", "numFmt"), {qn("w", "val"): "bullet"})
+                    ET.SubElement(lvl, qn("w", "suff"), {qn("w", "val"): "tab"})
                     ET.SubElement(lvl, qn("w", "lvlText"), {qn("w", "val"): bullets[level]})
-                    rpr = ET.SubElement(lvl, qn("w", "rPr"))
-                    ET.SubElement(rpr, qn("w", "rFonts"), {qn("w", "ascii"): "Symbol", qn("w", "hAnsi"): "Symbol"})
                 ET.SubElement(lvl, qn("w", "lvlJc"), {qn("w", "val"): "left"})
                 ppr = ET.SubElement(lvl, qn("w", "pPr"))
-                ET.SubElement(ppr, qn("w", "tabs"))
+                # Typst's list/enum indent is 0pt and body-indent is 0.5em.
+                # Word needs a single tab position for both marker and body, so 14pt
+                # is a practical compromise that keeps markers on the text margin
+                # while staying close to Typst's marker-width + 5.5pt body gap.
+                list_step = 280
+                left = list_step + level * list_step
+                tabs = ET.SubElement(ppr, qn("w", "tabs"))
+                ET.SubElement(tabs, qn("w", "tab"), {
+                    qn("w", "val"): "num",
+                    qn("w", "pos"): str(left),
+                })
                 ET.SubElement(ppr, qn("w", "ind"), {
-                    qn("w", "left"): str(720 + level * 360),
-                    qn("w", "hanging"): "360",
+                    qn("w", "left"): str(left),
+                    qn("w", "hanging"): str(list_step),
                 })
             num = ET.SubElement(root, qn("w", "num"), {qn("w", "numId"): str(spec.num_id)})
             ET.SubElement(num, qn("w", "abstractNumId"), {qn("w", "val"): str(spec.abstract_id)})
-            if spec.start != 1:
+            # Give every ordered list an explicit restart, including start=1.  This
+            # prevents Word from continuing a previous list merely because adjacent
+            # definitions happen to look compatible.
+            if spec.ordered:
                 override = ET.SubElement(num, qn("w", "lvlOverride"), {qn("w", "ilvl"): "0"})
                 ET.SubElement(override, qn("w", "startOverride"), {qn("w", "val"): str(spec.start)})
         self.builder.add_part("word/numbering.xml", root, CONTENT_TYPES["numbering"])
@@ -481,8 +640,19 @@ class DocxWriter:
 
     def _write_blocks(self, parent: ET.Element, blocks: Iterable[Block], part_name: str,
                       list_depth: int = 0) -> None:
+        previous_was_table = False
         for block in blocks:
+            is_table = isinstance(block, Table)
+            if self.doc.source_format == "typst" and previous_was_table and is_table:
+                # Adjacent w:tbl elements are treated as one table by Word and
+                # LibreOffice. Typst keeps adjacent block elements distinct and
+                # gives them the default 1.2em block spacing, so insert a tiny
+                # structural paragraph whose exact height represents that gap.
+                spacer = ParagraphStyle(space_before_pt=0.0, space_after_pt=0.0,
+                                        line_spacing=13.2, line_spacing_rule="exact")
+                parent.append(self._paragraph([], spacer, None, part_name))
             self._write_block(parent, block, part_name, list_depth)
+            previous_was_table = is_table
 
     def _write_block(self, parent: ET.Element, block: Block, part_name: str,
                      list_depth: int = 0) -> None:
@@ -491,48 +661,88 @@ class DocxWriter:
         elif isinstance(block, Heading):
             style = block.style.copy()
             style.style_id = "Title" if block.level <= 0 else f"Heading{min(9, max(1, block.level))}"
-            p = self._paragraph(block.inlines, style, None, part_name, heading_label=block.label)
+            inlines = list(block.inlines)
+            if block.number_text:
+                inlines = [Text(block.number_text + " "), *inlines]
+            p = self._paragraph(inlines, style, None, part_name, heading_label=block.label)
             parent.append(p)
         elif isinstance(block, ListBlock):
             self._write_list(parent, block, part_name, list_depth)
         elif isinstance(block, Table):
             parent.append(self._table(block, part_name))
         elif isinstance(block, Figure):
-            self._write_blocks(parent, block.body, part_name, list_depth)
+            for figure_body in block.body:
+                if isinstance(figure_body, Paragraph):
+                    figure_style = figure_body.style.copy()
+                    if figure_style.align is None:
+                        figure_style.align = block.align or "center"
+                    if block.caption and figure_style.space_after_pt is None:
+                        figure_style.space_after_pt = 0.0
+                    parent.append(self._paragraph(figure_body.inlines, figure_style, figure_body.list_props, part_name))
+                elif isinstance(figure_body, Table) and figure_body.align is None:
+                    original_align = figure_body.align
+                    figure_body.align = block.align or "center"
+                    parent.append(self._table(figure_body, part_name))
+                    figure_body.align = original_align
+                else:
+                    self._write_block(parent, figure_body, part_name, list_depth)
             if block.caption:
                 caption = []
                 supplement = block.supplement or ("Table" if block.kind_name == "table" else "Figure")
-                caption.extend([Text(supplement + " "), Field(f"SEQ {supplement} \\* ARABIC", [Text("1")]), Text(": ")])
+                if block.number_text:
+                    caption.extend([Text(f"{supplement} {block.number_text}: ")])
+                elif block.numbering:
+                    caption.extend([Text(supplement + " "), Field(f"SEQ {supplement} \\* ARABIC", [Text("1")]), Text(": ")])
                 caption.extend(block.caption)
                 style = ParagraphStyle(style_id="Caption", align=block.align or "center")
                 parent.append(self._paragraph(caption, style, None, part_name, heading_label=block.label))
         elif isinstance(block, Quote):
-            for child_block in block.blocks:
+            paragraph_positions = [i for i, item in enumerate(block.blocks) if isinstance(item, Paragraph)]
+            first_para = paragraph_positions[0] if paragraph_positions else None
+            last_para = paragraph_positions[-1] if paragraph_positions else None
+            for index, child_block in enumerate(block.blocks):
                 if isinstance(child_block, Paragraph):
                     style = child_block.style.copy(); style.style_id = "Quote"
+                    if style.space_before_pt is None:
+                        style.space_before_pt = 26.4 if index == first_para else 0.0
+                    if style.space_after_pt is None:
+                        style.space_after_pt = 0.0 if (index != last_para or block.attribution) else 19.8
                     parent.append(self._paragraph(child_block.inlines, style, child_block.list_props, part_name))
                 else:
                     self._write_block(parent, child_block, part_name, list_depth)
             if block.attribution:
-                style = ParagraphStyle(style_id="Quote", align="right")
+                style = ParagraphStyle(style_id="Quote", align="right", space_before_pt=0.0, space_after_pt=19.8)
                 parent.append(self._paragraph([Text("– "), *block.attribution], style, None, part_name))
         elif isinstance(block, CodeBlock):
-            style = ParagraphStyle(style_id="Code", shading="F2F2F2")
+            style = ParagraphStyle(style_id="Code")
             inlines: list[Inline] = []
+            code_style = TextStyle(font=_TYPST_MONO_FONT, size_pt=8.8, color="000000", no_proof=True).merged(block.style)
             lines = block.text.splitlines()
             for index, line in enumerate(lines or [""]):
                 if index:
                     inlines.append(Break("line"))
-                inlines.append(Text(line, TextStyle(font="Courier New", size_pt=9, no_proof=True)))
+                inlines.append(Text(line, code_style.copy()))
             parent.append(self._paragraph(inlines, style, None, part_name))
         elif isinstance(block, MathBlock):
             p = ET.Element(qn("w", "p"))
             ppr = ET.SubElement(p, qn("w", "pPr"))
-            ET.SubElement(ppr, qn("w", "jc"), {qn("w", "val"): "center"})
+            if block.number_text:
+                section = self.doc.section
+                content_width = max(72.0, section.page_width_pt - section.margin_left_pt - section.margin_right_pt)
+                tabs = ET.SubElement(ppr, qn("w", "tabs"))
+                ET.SubElement(tabs, qn("w", "tab"), {qn("w", "val"): "center", qn("w", "pos"): str(points_to_twips(content_width / 2) or 0)})
+                ET.SubElement(tabs, qn("w", "tab"), {qn("w", "val"): "right", qn("w", "pos"): str(points_to_twips(content_width) or 0)})
+                tab_run = ET.SubElement(p, qn("w", "r")); ET.SubElement(tab_run, qn("w", "tab"))
+            else:
+                ET.SubElement(ppr, qn("w", "jc"), {qn("w", "val"): "center"})
             math = self._decode_omml(block.omml, display=True) or typst_math_to_omml(block.typst, display=True)
             p.append(math)
+            if block.number_text:
+                tab_run = ET.SubElement(p, qn("w", "r")); ET.SubElement(tab_run, qn("w", "tab"))
+                p.append(self._text_run(block.number_text, TextStyle()))
             if block.label:
                 self._wrap_paragraph_bookmark(p, block.label)
+            _order_word_children(ppr, _PPR_ORDER)
             parent.append(p)
         elif isinstance(block, Divider):
             style = ParagraphStyle(borders={"bottom": Border("single", block.thickness_pt, block.color)},
@@ -634,7 +844,7 @@ class DocxWriter:
             ET.SubElement(ppr, qn("w", "outlineLvl"), {qn("w", "val"): str(max(0, min(9, style.outline_level)))})
         if not style.default_text_style.is_empty():
             ppr.append(self._run_properties(style.default_text_style))
-        return ppr
+        return _order_word_children(ppr, _PPR_ORDER)
 
     # ---------- inline content ----------
 
@@ -665,7 +875,17 @@ class DocxWriter:
                 if inline.children:
                     self._write_inlines(hyperlink, inline.children, part_name, deleted)
                 else:
-                    hyperlink.append(self._text_run(inline.target, TextStyle(color="0563C1", underline="single"), deleted=deleted))
+                    hyperlink.append(self._text_run(inline.target, TextStyle(), deleted=deleted))
+            elif isinstance(inline, Reference):
+                if inline.form == "page":
+                    if inline.supplement:
+                        parent.append(self._text_run(inline.supplement + " ", TextStyle(), deleted=deleted))
+                    target = self._safe_bookmark_name(inline.target)
+                    self._write_field(parent, Field(f"PAGEREF {target} \\h", inline.children or [Text("1")]), part_name)
+                else:
+                    attrs = {qn("w", "anchor"): self._safe_bookmark_name(inline.target)}
+                    hyperlink = ET.SubElement(parent, qn("w", "hyperlink"), attrs)
+                    self._write_inlines(hyperlink, inline.children or [Text("@" + inline.target)], part_name, deleted)
             elif isinstance(inline, Bookmark):
                 bookmark_id = self._bookmark_id(inline.name, inline.bookmark_id)
                 if inline.end:
@@ -683,7 +903,9 @@ class DocxWriter:
             elif isinstance(inline, NoteRef):
                 note_id = self._note_id(inline)
                 run = ET.SubElement(parent, qn("w", "r"))
-                rpr = ET.SubElement(run, qn("w", "rPr")); ET.SubElement(rpr, qn("w", "rStyle"), {qn("w", "val"): "FootnoteReference"})
+                rpr = ET.SubElement(run, qn("w", "rPr")); ET.SubElement(rpr, qn("w", "rStyle"), {
+                    qn("w", "val"): "FootnoteReference" if inline.note_type == "footnote" else "EndnoteReference"
+                })
                 ET.SubElement(run, qn("w", "footnoteReference" if inline.note_type == "footnote" else "endnoteReference"), {qn("w", "id"): str(note_id)})
             elif isinstance(inline, Field):
                 self._write_field(parent, inline, part_name)
@@ -790,7 +1012,7 @@ class DocxWriter:
             ET.SubElement(rpr, qn("w", "w"), {qn("w", "val"): str(style.scale_percent)})
         if style.baseline_pt is not None:
             ET.SubElement(rpr, qn("w", "position"), {qn("w", "val"): str(points_to_half_points(style.baseline_pt) or 0)})
-        return rpr
+        return _order_word_children(rpr, _RPR_ORDER)
 
     def _write_field(self, parent: ET.Element, field: Field, part_name: str) -> None:
         begin = ET.SubElement(parent, qn("w", "r"))
@@ -926,7 +1148,7 @@ class DocxWriter:
             blocks = item.blocks or [Paragraph([])]
             first_emitted = False
             if item.checked is not None:
-                prefix = "☒ " if item.checked else "☐ "
+                prefix = "[x] " if item.checked else "[ ] "
             else:
                 prefix = ""
             for child in blocks:
@@ -965,8 +1187,24 @@ class DocxWriter:
             ET.SubElement(pr, qn("w", "shd"), {qn("w", "val"): "clear", qn("w", "fill"): normalize_hex_color(table.shading, "FFFFFF") or "FFFFFF"})
         if table.cell_spacing_pt is not None:
             ET.SubElement(pr, qn("w", "tblCellSpacing"), {qn("w", "w"): str(points_to_twips(table.cell_spacing_pt) or 0), qn("w", "type"): "dxa"})
-        borders = table.borders or {side: Border("single", 0.5, "BFBFBF") for side in ("top", "left", "bottom", "right", "insideH", "insideV")}
-        border_root = ET.SubElement(pr, qn("w", "tblBorders")); self._append_borders(border_root, borders)
+        typst_kind = table.raw.get("typst_kind") if self.doc.source_format == "typst" else None
+        if table.borders:
+            borders = table.borders
+        elif typst_kind == "table":
+            borders = {side: Border("single", 1.0, "000000") for side in ("top", "left", "bottom", "right", "insideH", "insideV")}
+        elif typst_kind == "grid":
+            borders = {}
+        else:
+            borders = {side: Border("single", 0.5, "BFBFBF") for side in ("top", "left", "bottom", "right", "insideH", "insideV")}
+        if borders:
+            border_root = ET.SubElement(pr, qn("w", "tblBorders")); self._append_borders(border_root, borders)
+        elif typst_kind == "grid":
+            # Be explicit about Typst grid's borderless default.  Leaving the
+            # element absent lets some Word-compatible renderers apply their
+            # own default table-grid appearance.
+            border_root = ET.SubElement(pr, qn("w", "tblBorders"))
+            for side in ("top", "left", "bottom", "right", "insideH", "insideV"):
+                ET.SubElement(border_root, qn("w", side), {qn("w", "val"): "nil"})
         if table.bidi: ET.SubElement(pr, qn("w", "bidiVisual"))
 
         placements, ncols = self._table_placements(table)
@@ -977,6 +1215,8 @@ class DocxWriter:
         for col in range(ncols):
             ET.SubElement(grid, qn("w", "gridCol"), {qn("w", "w"): str(points_to_twips(widths[col] or default_width) or 1440)})
 
+        previous_inset = getattr(self, "_active_typst_table_inset", None)
+        self._active_typst_table_inset = _TYPST_TABLE_INSET_PT if typst_kind == "table" else 0.0 if typst_kind == "grid" else None
         for row_index, row in enumerate(table.rows):
             tr = ET.SubElement(tbl, qn("w", "tr"))
             trpr = ET.SubElement(tr, qn("w", "trPr"))
@@ -994,35 +1234,33 @@ class DocxWriter:
                 cell, origin_row, origin_col, is_continuation = placement
                 self._append_table_cell(tr, cell, part_name, is_continuation, row.header, widths, origin_col)
                 col += max(1, cell.colspan)
+        self._active_typst_table_inset = previous_inset
         return tbl
 
     def _table_placements(self, table: Table) -> tuple[dict[tuple[int, int], tuple[TableCell, int, int, bool]], int]:
-        occupied: dict[tuple[int, int], tuple[TableCell, int, int, bool]] = {}
+        # Reserve the entire rectangle covered by a colspan/rowspan but emit a
+        # physical Word cell only at the horizontal origin.  A vertically
+        # merged continuation is emitted at that same column on subsequent
+        # rows.  This keeps later cells out of columns occupied by rowspans.
+        placements: dict[tuple[int, int], tuple[TableCell, int, int, bool]] = {}
+        occupied: set[tuple[int, int]] = set()
         max_col = 0
         for r, row in enumerate(table.rows):
             col = 0
             for cell in row.cells:
-                while (r, col) in occupied:
+                colspan = max(1, cell.colspan)
+                rowspan = max(1, cell.rowspan)
+                while any((r, cc) in occupied for cc in range(col, col + colspan)):
                     col += 1
-                colspan = max(1, cell.colspan); rowspan = max(1, cell.rowspan)
-                occupied[(r, col)] = (cell, r, col, False)
+                placements[(r, col)] = (cell, r, col, False)
                 for rr in range(r + 1, r + rowspan):
-                    occupied[(rr, col)] = (cell, r, col, True)
-                # Covered columns are marked with None sentinel by omission and skipped using colspan at starts.
+                    placements[(rr, col)] = (cell, r, col, True)
                 for rr in range(r, r + rowspan):
-                    for cc in range(col + 1, col + colspan):
-                        occupied[(rr, cc)] = (cell, r, col, True) if rr > r and cc == col else occupied.get((rr, cc), None)  # type: ignore[assignment]
+                    for cc in range(col, col + colspan):
+                        occupied.add((rr, cc))
+                max_col = max(max_col, col + colspan)
                 col += colspan
-                max_col = max(max_col, col)
-        # Remove internal span sentinels. Only origin or vertical continuation starts should emit a tc.
-        cleaned: dict[tuple[int, int], tuple[TableCell, int, int, bool]] = {}
-        for key, value in occupied.items():
-            if value is None:
-                continue
-            cell, origin_r, origin_c, continuation = value
-            if key[1] == origin_c:
-                cleaned[key] = value
-        return cleaned, max_col
+        return placements, max_col
 
     def _append_table_cell(self, tr: ET.Element, cell: TableCell, part_name: str,
                            continuation: bool, row_header: bool,
@@ -1046,9 +1284,16 @@ class DocxWriter:
             ET.SubElement(pr, qn("w", "shd"), {qn("w", "val"): "clear", qn("w", "fill"): normalize_hex_color(cell.shading, "FFFFFF") or "FFFFFF"})
         if cell.borders:
             borders = ET.SubElement(pr, qn("w", "tcBorders")); self._append_borders(borders, cell.borders)
-        if cell.margins_pt:
+        margins_values = dict(cell.margins_pt)
+        if not margins_values and self.doc.source_format == "typst":
+            # Typst tables default to 5pt inset; grids default to zero inset.
+            # The owning table kind is provided transiently while serializing rows.
+            inset = getattr(self, "_active_typst_table_inset", None)
+            if inset is not None:
+                margins_values = {side: inset for side in ("top", "left", "bottom", "right")}
+        if margins_values:
             margins = ET.SubElement(pr, qn("w", "tcMar"))
-            for side, value in cell.margins_pt.items():
+            for side, value in margins_values.items():
                 ET.SubElement(margins, qn("w", side), {qn("w", "w"): str(points_to_twips(value) or 0), qn("w", "type"): "dxa"})
         if continuation:
             ET.SubElement(tc, qn("w", "p"))
@@ -1056,7 +1301,21 @@ class DocxWriter:
         if cell.header or row_header:
             # Header semantics are represented at row level; preserve a cell hint too.
             ET.SubElement(pr, qn("w", "tcFitText"), {qn("w", "val"): "0"})
-        self._write_blocks(tc, cell.blocks, part_name)
+        blocks = list(cell.blocks)
+        if self.doc.source_format == "typst":
+            # Word applies Normal's paragraph-after spacing inside table cells,
+            # which makes compact Typst tables/grids look vertically inflated.
+            # Suppress only the final paragraph's after-space in each cell;
+            # explicit Typst paragraph spacing remains authoritative.
+            for index in range(len(blocks) - 1, -1, -1):
+                block = blocks[index]
+                if isinstance(block, Paragraph):
+                    if block.style.space_after_pt is None:
+                        style = block.style.copy()
+                        style.space_after_pt = 0.0
+                        blocks[index] = Paragraph(list(block.inlines), style, block.list_props, block.source_span)
+                    break
+        self._write_blocks(tc, blocks, part_name)
         if not any(child.tag == qn("w", "p") for child in tc):
             ET.SubElement(tc, qn("w", "p"))
 
@@ -1095,6 +1354,23 @@ class DocxWriter:
             for note_id, blocks in sorted(self._note_bodies[note_type].items()):
                 item = ET.SubElement(root, qn("w", item_tag), {qn("w", "id"): str(note_id)})
                 self._write_blocks(item, blocks or [Paragraph([])], f"word/{plural}.xml")
+                # WordprocessingML footnote/endnote bodies need an explicit
+                # reference marker in the note text. Without it, some renderers
+                # synthesize the number flush against the first word.
+                first_p = item.find(qn("w", "p"))
+                if first_p is not None:
+                    marker_run = ET.Element(qn("w", "r"))
+                    marker_rpr = ET.SubElement(marker_run, qn("w", "rPr"))
+                    ET.SubElement(marker_rpr, qn("w", "rStyle"), {
+                        qn("w", "val"): "FootnoteReference" if note_type == "footnote" else "EndnoteReference"
+                    })
+                    ET.SubElement(marker_run, qn("w", "footnoteRef" if note_type == "footnote" else "endnoteRef"))
+                    spacer_run = ET.Element(qn("w", "r"))
+                    spacer_text = ET.SubElement(spacer_run, qn("w", "t"), {qn("xml", "space"): "preserve"})
+                    spacer_text.text = " "
+                    insert_at = 1 if len(first_p) and first_p[0].tag == qn("w", "pPr") else 0
+                    first_p.insert(insert_at, marker_run)
+                    first_p.insert(insert_at + 1, spacer_run)
             part = f"word/{plural}.xml"
             self.builder.add_part(part, root, CONTENT_TYPES[plural])
             self.builder.add_relationship(self.document_part, REL_TYPES[plural], f"{plural}.xml")
@@ -1161,12 +1437,18 @@ class DocxWriter:
 
     def _section_properties(self, section: SectionProperties, part_name: str) -> ET.Element:
         sect = ET.Element(qn("w", "sectPr"))
+        page_number_category = "header" if section.page_number_align and "top" in section.page_number_align.lower() else "footer"
+        page_number_blocks = self._page_numbering_blocks(section) if section.page_numbering else []
         for category in ("header", "footer"):
             for kind in ("default", "first", "even"):
                 blocks = getattr(section, f"{category}_{kind}")
+                if (not blocks and page_number_blocks and category == page_number_category and kind == "default"):
+                    blocks = page_number_blocks
                 if blocks:
                     target, rid = self._add_header_footer(category, blocks, part_name)
                     ET.SubElement(sect, qn("w", f"{category}Reference"), {qn("w", "type"): kind, qn("r", "id"): rid})
+        if section.section_type:
+            ET.SubElement(sect, qn("w", "type"), {qn("w", "val"): section.section_type})
         ET.SubElement(sect, qn("w", "pgSz"), {
             qn("w", "w"): str(points_to_twips(section.page_width_pt) or 11906),
             qn("w", "h"): str(points_to_twips(section.page_height_pt) or 16838),
@@ -1181,8 +1463,12 @@ class DocxWriter:
             qn("w", "footer"): str(points_to_twips(section.footer_distance_pt) or 720),
             qn("w", "gutter"): str(points_to_twips(section.gutter_pt) or 0),
         })
+        column_spacing_pt = section.column_spacing_pt
+        if self.doc.source_format == "typst" and not section.raw.get("typst_column_gutter_explicit"):
+            content_width_pt = max(0.0, section.page_width_pt - section.margin_left_pt - section.margin_right_pt)
+            column_spacing_pt = 0.04 * content_width_pt
         cols_attrs = {qn("w", "num"): str(max(1, section.columns)),
-                      qn("w", "space"): str(points_to_twips(section.column_spacing_pt) or 720),
+                      qn("w", "space"): str(points_to_twips(column_spacing_pt) or 0),
                       qn("w", "equalWidth"): "1" if section.equal_column_width else "0"}
         cols = ET.SubElement(sect, qn("w", "cols"), cols_attrs)
         if not section.equal_column_width and section.column_widths_pt:
@@ -1202,7 +1488,44 @@ class DocxWriter:
                 if value is None: continue
                 attrs[qn("w", mapping.get(key, key))] = str(points_to_twips(value) if key == "distance_pt" else value)
             ET.SubElement(sect, qn("w", "lnNumType"), attrs)
-        return sect
+        return _order_word_children(sect, _SECTPR_ORDER)
+
+    def _page_numbering_blocks(self, section: SectionProperties) -> list[Block]:
+        pattern = section.page_numbering or "1"
+        align_raw = (section.page_number_align or "center").lower()
+        if "right" in align_raw or "end" in align_raw:
+            align = "right"
+        elif "left" in align_raw or "start" in align_raw:
+            align = "left"
+        else:
+            align = "center"
+
+        field_switch = {
+            "upperRoman": "ROMAN",
+            "lowerRoman": "roman",
+            "upperLetter": "ALPHABETIC",
+            "lowerLetter": "alphabetic",
+        }.get(section.page_number_format)
+
+        def page_field(command: str) -> Field:
+            code = command + (f" \\* {field_switch}" if field_switch else "")
+            return Field(code, [Text("1")])
+
+        inlines: list[Inline] = []
+        if "1" in pattern:
+            pieces = pattern.split("1")
+            for index, piece in enumerate(pieces):
+                if piece:
+                    inlines.append(Text(piece))
+                if index < len(pieces) - 1:
+                    inlines.append(page_field("PAGE" if index == 0 else "NUMPAGES"))
+        elif pattern in {"i", "I", "a", "A"}:
+            inlines.append(page_field("PAGE"))
+        else:
+            # Unknown custom numbering functions cannot be evaluated statically.  A
+            # dynamic PAGE field is still materially closer than dropping numbering.
+            inlines.append(page_field("PAGE"))
+        return [Paragraph(inlines, ParagraphStyle(align=align))]
 
     def _add_header_footer(self, category: str, blocks: list[Block], source_part: str) -> tuple[str, str]:
         self._header_footer_index[category] += 1

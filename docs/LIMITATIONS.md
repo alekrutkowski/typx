@@ -31,7 +31,11 @@ The converter targets semantic and visual similarity, not identical coordinates.
 
 ## Word fields
 
-DOCX stores fields such as TOC, REF, PAGEREF, PAGE, NUMPAGES, SEQ, DATE, CITATION, and BIBLIOGRAPHY as instructions plus cached results. `typx` maps known fields to native Typst constructs where practical. Other fields use a `typx_field` wrapper. Word-compatible applications may need to update fields after opening the generated DOCX.
+DOCX stores fields such as TOC, REF, PAGEREF, PAGE, NUMPAGES, SEQ, DATE, CITATION, and BIBLIOGRAPHY as instructions plus cached results. `typx` maps known fields to native Typst constructs where practical. Static Typst references to numbered headings, figures, and equations become internal Word hyperlinks; page-form references become `PAGEREF`; and simple automatic page numbering becomes PAGE/NUMPAGES fields. In the reverse direction, `PAGEREF` maps to Typst's page-reference form, while general Word `REF`/`NOTEREF` fields map to internal `#link` calls because a Word bookmark may target arbitrary content that is not a Typst referenceable element. Other fields use a `typx_field` wrapper. Applications may need to update layout-dependent field results after edits.
+
+## Content controls
+
+Block and inline Word structured-document tags (content controls) preserve their visible content. `typx` retains control metadata in semantic or raw-preservation wrappers where practical. Application-specific validation, bindings to custom XML data stores, and interactive form behavior are not executed by Typst.
 
 ## Word application extensions
 
@@ -54,7 +58,15 @@ Tracked insertions, deletions, moves, authors, dates, and comment anchors are mo
 
 ## Bibliographies
 
-Typst CSL processing and Word's bibliography/citation field model are not equivalent. Keys, supplements, visible fallback text, and selected metadata can be carried over, but style-specific output can differ.
+DOCX-to-Typst conversion reads Word's current-document bibliography source records from the package's `customXml` data store and writes them as a BibLaTeX asset. Common `CITATION` and `BIBLIOGRAPHY` fields become Typst `cite`/`bibliography` elements. Common Word style selections are mapped to Typst built-in CSL styles where there is a clear counterpart.
+
+Typst CSL processing and Word's bibliography engine are still not identical. Word can group sources, use application-specific field switches, or cache a display that cannot be reconstructed exactly from Typst's citation model. In those cases, `typx` preserves the cached Word display and registers the source keys invisibly so bibliography membership is not lost. Unsupported Word source types/fields are retained as far as BibLaTeX permits, but style-specific punctuation and ordering may differ.
+
+## Font assets in DOCX-to-Typst conversion
+
+When assets are enabled, the reverse converter collects font families actually used by document content. Embedded Word font parts are preferred; if a required face is not embedded, `typx` searches the local system font directories and Word font-table alternate names. Matching font files are copied into the generated Typst asset tree. The generated Typst refers to their family names because Typst selects fonts by family rather than by file path.
+
+The set of system fonts is machine-dependent. A conversion performed on Windows with Microsoft Office installed can therefore resolve fonts that are unavailable on a Linux host, and vice versa. If a font is neither embedded nor installed, `typx` emits a warning and leaves the requested family name in the Typst output. Local Typst compilation must make extracted font directories discoverable with `--font-path` (or an equivalent environment setting). Font licensing remains the user's responsibility; typx release archives do not redistribute fonts.
 
 ## Exact round-trip eligibility
 

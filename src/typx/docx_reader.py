@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Iterable, Literal
 
 from .constants import NS, REL_TYPES
+from .bibliography import entries_to_biblatex, parse_word_bibliography_roots
+from .fonts import deobfuscate_ooxml_font, find_system_fonts, font_extension, font_family_names, font_style_names
 from .docx_package import DocxPackage, Relationship
 from .model import (
     Block,
@@ -126,6 +128,10 @@ class DocxReader:
         self.document_part = package.office_document_part()
         self.document_rels = package.relationships(self.document_part)
         self.doc = Document(source_format="docx")
+        # Sections are populated from w:sectPr as the document is parsed.  Keeping the
+        # model's synthetic default section here would make it incorrectly become the
+        # first section seen by the Typst writer.
+        self.doc.sections = []
         self.styles: dict[str, StyleDefinition] = {}
         self.style_names: dict[str, str] = {}
         self.numbering_levels: dict[int, dict[int, NumberingLevel]] = {}
@@ -135,6 +141,7 @@ class DocxReader:
         self._resource_by_part: dict[str, str] = {}
         self._bookmark_names: dict[str, str] = {}
         self._section_index = 0
+        self.theme_fonts: dict[str, str] = {}
 
     @classmethod
     def read(cls, source: str | Path | bytes,
@@ -144,6 +151,8 @@ class DocxReader:
 
     def parse(self) -> Document:
         self._parse_metadata()
+        self._parse_bibliography()
+        self._parse_theme_fonts()
         self._parse_styles()
         self._parse_numbering()
         self._parse_comments()
@@ -154,6 +163,22 @@ class DocxReader:
         if body is None:
             raise ValueError("word/document.xml has no w:body")
         raw_blocks = self._parse_block_children(body, self.document_part)
+        # In WordprocessingML, a paragraph-level w:sectPr describes the section
+        # that ends at that paragraph.  Typst's page-setting syntax, however,
+        # applies to the content that follows a section boundary.  Re-associate
+        # parsed section-break blocks with the *next* parsed section so the
+        # DOCX -> Typst writer switches geometry/header/footer at the correct
+        # point.  Keep the first section in doc.sections for the preamble.
+        section_breaks = [block for block in raw_blocks
+                          if isinstance(block, BreakBlock) and block.break_type == "section"]
+        for index, block in enumerate(section_breaks, start=1):
+            if index < len(self.doc.sections):
+                next_section = self.doc.sections[index]
+                # w:type is carried on the boundary sectPr in DOCX.  Preserve it
+                # on the following-section view used by TypstWriter when present.
+                if block.section and block.section.section_type and not next_section.section_type:
+                    next_section.section_type = block.section.section_type
+                block.section = next_section
         self.doc.blocks = self._group_lists(raw_blocks)
         if not self.doc.sections:
             self.doc.sections = [SectionProperties()]
@@ -162,6 +187,8 @@ class DocxReader:
         self.doc.endnotes = self.notes["endnote"]
         self.doc.comments = self.comment_ranges
         self.doc.source_path = None
+        if self.options.extract_assets:
+            self._extract_used_fonts()
         if self.options.preserve_package_parts:
             self.doc.raw_package_parts = dict(self.package.parts)
         return self.doc
@@ -380,6 +407,257 @@ class DocxReader:
                 continue
             self.notes[note_type][note_id] = self._group_lists(self._parse_block_children(note, part))
 
+    def _parse_theme_fonts(self) -> None:
+        theme_part = self._part_for_rel_type(REL_TYPES["theme"])
+        if not theme_part or not self.package.get(theme_part):
+            return
+        try:
+            root = self.package.xml(theme_part)
+        except (ET.ParseError, ValueError):
+            return
+        scheme = root.find(".//" + qn("a", "fontScheme"))
+        if scheme is None:
+            return
+        for kind, prefix in (("majorFont", "major"), ("minorFont", "minor")):
+            group = scheme.find(qn("a", kind))
+            if group is None:
+                continue
+            latin = group.find(qn("a", "latin"))
+            ea = group.find(qn("a", "ea"))
+            cs = group.find(qn("a", "cs"))
+            latin_name = latin.get("typeface") if latin is not None else None
+            ea_name = ea.get("typeface") if ea is not None else None
+            cs_name = cs.get("typeface") if cs is not None else None
+            if latin_name:
+                for suffix in ("HAnsi", "Ascii"):
+                    self.theme_fonts[prefix + suffix] = latin_name
+            if ea_name:
+                self.theme_fonts[prefix + "EastAsia"] = ea_name
+            if cs_name:
+                self.theme_fonts[prefix + "Bidi"] = cs_name
+
+    def _parse_bibliography(self) -> None:
+        roots: list[ET.Element] = []
+        for part_name in self.package.list_parts("customXml/"):
+            if not part_name.lower().endswith(".xml"):
+                continue
+            data = self.package.get(part_name)
+            if not data or NS["b"].encode("utf-8") not in data:
+                continue
+            try:
+                root = self.package.xml(part_name)
+            except (ET.ParseError, ValueError):
+                continue
+            if local_name(root.tag) == "Sources" and root.tag.startswith("{" + NS["b"] + "}"):
+                roots.append(root)
+        for root in roots:
+            selected = (root.get("SelectedStyle") or root.get("StyleName") or "").strip()
+            normalized = re.sub(r"[^a-z0-9]+", "", selected.casefold())
+            style_map = {
+                "apaxsl": "apa", "apa": "apa",
+                "ieeexsl": "ieee", "ieee": "ieee",
+                "mlaxsl": "mla", "mla": "mla",
+                "chicagoxsl": "chicago-author-date",
+                "chicago": "chicago-author-date",
+            }
+            if normalized in style_map:
+                self.doc.bibliography_style = style_map[normalized]
+                break
+        entries, key_map = parse_word_bibliography_roots(roots)
+        if not entries:
+            return
+        payload = entries_to_biblatex(entries).encode("utf-8")
+        checksum = hashlib.sha256(payload).hexdigest()
+        resource_id = "bib-" + checksum[:16]
+        self.doc.add_resource(Resource(
+            id=resource_id,
+            filename="bibliography/references.bib",
+            media_type="application/x-bibtex",
+            data=payload,
+            checksum=checksum,
+            raw={"kind": "bibliography", "source": "word-custom-xml"},
+        ))
+        self.doc.bibliography_resource_id = resource_id
+        self.doc.bibliography_keys = key_map
+
+    @staticmethod
+    def _font_variant(style: TextStyle) -> str:
+        if style.bold and style.italic:
+            return "boldItalic"
+        if style.bold:
+            return "bold"
+        if style.italic:
+            return "italic"
+        return "regular"
+
+    def _used_font_families(self) -> dict[str, set[str]]:
+        used: dict[str, set[str]] = {}
+
+        def add_style(style: TextStyle) -> None:
+            for family in (style.font, style.font_east_asia, style.font_complex):
+                if family:
+                    used.setdefault(family, set()).add(self._font_variant(style))
+
+        def scan_inlines(items: Iterable[Inline]) -> None:
+            for inline in items:
+                if isinstance(inline, Text):
+                    add_style(inline.style)
+                elif isinstance(inline, (Link, Field, Change)):
+                    scan_inlines(inline.children)
+                elif isinstance(inline, Citation):
+                    scan_inlines(inline.fallback)
+                elif isinstance(inline, RawInline):
+                    scan_inlines(inline.fallback)
+
+        def scan_blocks(blocks: Iterable[Block]) -> None:
+            for block in blocks:
+                if isinstance(block, (Paragraph, Heading)):
+                    scan_inlines(block.inlines)
+                elif isinstance(block, ListBlock):
+                    for item in block.items:
+                        scan_blocks(item.blocks)
+                elif isinstance(block, Table):
+                    for row in block.rows:
+                        for cell in row.cells:
+                            scan_blocks(cell.blocks)
+                elif isinstance(block, Figure):
+                    scan_blocks(block.body)
+                    scan_inlines(block.caption)
+                elif isinstance(block, Quote):
+                    scan_blocks(block.blocks)
+                    scan_inlines(block.attribution)
+                elif isinstance(block, ContentControl):
+                    scan_blocks(block.blocks)
+                elif isinstance(block, RawBlock):
+                    scan_blocks(block.fallback)
+
+        scan_blocks(self.doc.blocks)
+        for note_blocks in self.doc.footnotes.values():
+            scan_blocks(note_blocks)
+        for note_blocks in self.doc.endnotes.values():
+            scan_blocks(note_blocks)
+        for comment in self.doc.comments.values():
+            scan_blocks(comment.blocks)
+        defaults = self.styles.get("__docDefaults__")
+        if defaults and defaults.text.font:
+            used.setdefault(defaults.text.font, set()).add("regular")
+        return used
+
+    def _extract_used_fonts(self) -> None:
+        used = self._used_font_families()
+        if not used:
+            return
+        font_table_part = self._part_for_rel_type(REL_TYPES["font_table"])
+        table_root = None
+        table_rels: dict[str, Relationship] = {}
+        if font_table_part and self.package.get(font_table_part):
+            try:
+                table_root = self.package.xml(font_table_part)
+                table_rels = self.package.relationships(font_table_part)
+            except (ET.ParseError, ValueError):
+                table_root = None
+        word_fonts: dict[str, ET.Element] = {}
+        aliases: dict[str, list[str]] = {}
+        if table_root is not None:
+            for font in children(table_root, "font"):
+                name = attr(font, "name")
+                if not name:
+                    continue
+                word_fonts[name.casefold()] = font
+                alias = attr(child(font, "altName"), "val")
+                if alias:
+                    aliases.setdefault(name.casefold(), []).append(alias)
+
+        seen_sources: set[tuple[str, str]] = set()
+        resolved_names: dict[str, list[str]] = {}
+        for family in sorted(used, key=str.casefold):
+            requested_variants = used[family]
+            font_element = word_fonts.get(family.casefold())
+            embedded_variants: set[str] = set()
+            if font_element is not None:
+                for child_name, variant in (
+                    ("embedRegular", "regular"), ("embedBold", "bold"),
+                    ("embedItalic", "italic"), ("embedBoldItalic", "boldItalic"),
+                ):
+                    embedded = child(font_element, child_name)
+                    if embedded is None:
+                        continue
+                    rel_id = attr(embedded, "id", None, "r")
+                    rel = table_rels.get(rel_id or "")
+                    if rel is None or rel.external:
+                        continue
+                    payload = self.package.get(rel.resolved_target)
+                    if payload is None:
+                        continue
+                    payload = deobfuscate_ooxml_font(payload, attr(embedded, "fontKey"))
+                    internal_names = sorted(font_family_names(payload), key=str.casefold)
+                    if internal_names:
+                        resolved_names.setdefault(family, []).extend(internal_names)
+                    ext = font_extension(payload)
+                    filename = sanitize_filename(f"{family}-{variant}{ext}", f"font-{variant}{ext}")
+                    checksum = hashlib.sha256(payload).hexdigest()
+                    key = ("data", checksum)
+                    if key in seen_sources:
+                        embedded_variants.add(variant)
+                        continue
+                    seen_sources.add(key)
+                    resource_id = "font-" + checksum[:16]
+                    self.doc.add_resource(Resource(
+                        id=resource_id,
+                        filename=f"fonts/{filename}",
+                        media_type={".otf": "font/otf", ".ttc": "font/collection"}.get(ext, "font/ttf"),
+                        data=payload,
+                        checksum=checksum,
+                        raw={
+                            "kind": "font", "family": family, "variant": variant,
+                            "source": "embedded", "part": rel.resolved_target,
+                            "internal_families": internal_names,
+                        },
+                    ))
+                    self.doc.font_resource_ids.append(resource_id)
+                    embedded_variants.add(variant)
+
+            needs_system = not requested_variants.issubset(embedded_variants)
+            if needs_system:
+                paths = find_system_fonts(family, aliases=aliases.get(family.casefold(), ()))
+                for path in paths:
+                    try:
+                        payload = path.read_bytes()
+                    except OSError:
+                        continue
+                    internal_names = sorted(font_family_names(payload), key=str.casefold)
+                    if internal_names:
+                        resolved_names.setdefault(family, []).extend(internal_names)
+                    style_names = sorted(font_style_names(payload), key=str.casefold)
+                    ext = path.suffix.lower() if path.suffix.lower() in {".ttf", ".otf", ".ttc"} else font_extension(payload)
+                    checksum = hashlib.sha256(payload).hexdigest()
+                    key = ("path", str(path.resolve()))
+                    if key in seen_sources:
+                        continue
+                    seen_sources.add(key)
+                    filename = sanitize_filename(path.name, f"{family}{ext}")
+                    resource_id = "font-" + checksum[:16]
+                    self.doc.add_resource(Resource(
+                        id=resource_id,
+                        filename=f"fonts/{filename}",
+                        media_type={".otf": "font/otf", ".ttc": "font/collection"}.get(ext, "font/ttf"),
+                        source_path=str(path),
+                        checksum=checksum,
+                        raw={
+                            "kind": "font", "family": family, "source": "system",
+                            "internal_families": internal_names, "styles": style_names,
+                        },
+                    ))
+                    self.doc.font_resource_ids.append(resource_id)
+            if family not in resolved_names:
+                self.doc.warnings.append(
+                    f"font {family!r} is used by the DOCX but was neither embedded nor found in installed system font folders"
+                )
+
+        for family, names in resolved_names.items():
+            candidates = [family] + [name for name in names if name.casefold() != family.casefold()]
+            self.doc.font_families[family] = list(dict.fromkeys(candidates))
+
     # ---------- property parsing ----------
 
     def _parse_rpr(self, rpr: ET.Element | None) -> TextStyle:
@@ -400,9 +678,14 @@ class DocxReader:
             small_caps=bool_attr(child(rpr, "smallCaps")) if child(rpr, "smallCaps") is not None else None,
             all_caps=bool_attr(child(rpr, "caps")) if child(rpr, "caps") is not None else None,
             hidden=bool_attr(child(rpr, "vanish")) if child(rpr, "vanish") is not None else None,
-            font=attr(fonts, "ascii") or attr(fonts, "hAnsi") or attr(fonts, "cs"),
-            font_east_asia=attr(fonts, "eastAsia"),
-            font_complex=attr(fonts, "cs"),
+            font=(attr(fonts, "ascii") or attr(fonts, "hAnsi") or attr(fonts, "cs")
+                  or self.theme_fonts.get(attr(fonts, "asciiTheme") or "")
+                  or self.theme_fonts.get(attr(fonts, "hAnsiTheme") or "")
+                  or self.theme_fonts.get(attr(fonts, "cstheme") or "")),
+            font_east_asia=(attr(fonts, "eastAsia")
+                            or self.theme_fonts.get(attr(fonts, "eastAsiaTheme") or "")),
+            font_complex=(attr(fonts, "cs")
+                          or self.theme_fonts.get(attr(fonts, "cstheme") or "")),
             size_pt=half_points_to_points(attr(child(rpr, "sz"), "val")),
             color=normalize_hex_color(attr(color, "val")) if color is not None and attr(color, "val") != "auto" else None,
             highlight=ooxml_highlight_to_hex(attr(highlight, "val")) if highlight is not None else normalize_hex_color(attr(shading, "fill")) if shading is not None else None,
@@ -593,7 +876,10 @@ class DocxReader:
         if level is not None and level <= 8:
             return Heading(
                 level=0 if level < 0 else level + 1,
-                inlines=inlines,
+                # A heading's semantic label is already carried by Heading.label.
+                # Retaining the bookmark start/end in the inline stream duplicates
+                # the Typst label and can place it before the heading text.
+                inlines=semantic_inlines,
                 label=label,
                 style=style,
             )
@@ -715,9 +1001,27 @@ class DocxReader:
                     else:
                         for inline in children_inline:
                             append(inline)
-            elif tag in {"smartTag", "customXml", "sdt"}:
+            elif tag in {"smartTag", "customXml"}:
                 for inline in self._parse_inline_children(element, part_name, inherited_style):
                     append(inline)
+            elif tag == "sdt":
+                # Inline content controls wrap their visible runs in w:sdtContent;
+                # recursing over the outer w:sdt would otherwise treat w:sdtPr and
+                # w:sdtContent as unknown fragments and lose the displayed value.
+                sdt_pr = child(element, "sdtPr")
+                content = child(element, "sdtContent")
+                visible = (self._parse_inline_children(content, part_name, inherited_style)
+                           if content is not None else [])
+                if self.options.unknown == "preserve" and sdt_pr is not None:
+                    append(RawInline(
+                        "ooxml",
+                        encode_raw_fragment(xml_bytes(sdt_pr)),
+                        visible,
+                        "Word inline content control",
+                    ))
+                else:
+                    for inline in visible:
+                        append(inline)
             elif element.tag in {qn("m", "oMath"), qn("m", "oMathPara")}:
                 append(MathInline(omml_to_typst(element), display=tag == "oMathPara",
                                        omml=encode_raw_fragment(xml_bytes(element))))
@@ -1049,6 +1353,7 @@ class DocxReader:
             header_distance_pt=twips_to_points(attr(pg_mar, "header")) or 36.0,
             footer_distance_pt=twips_to_points(attr(pg_mar, "footer")) or 36.0,
             orientation=attr(pg_sz, "orient", "portrait"),
+            section_type=attr(child(sect_pr, "type"), "val"),
             columns=parse_int(attr(cols, "num"), 1) or 1,
             column_spacing_pt=twips_to_points(attr(cols, "space")) or 36.0,
             equal_column_width=bool_attr(cols, "equalWidth", True) is not False,
@@ -1086,8 +1391,56 @@ class DocxReader:
             parsed = self._group_lists(self._parse_block_children(root, rel.resolved_target))
             kind = attr(ref, "type", "default")
             setattr(section, f"{'header' if tag == 'headerReference' else 'footer'}_{kind}", parsed)
+
+        # Recognize the simple automatic page-number header/footer emitted by typx and
+        # common Word documents.  Keeping this semantic in SectionProperties lets the
+        # Typst writer restore #set page(numbering: ..., number-align: ...) instead of
+        # degrading it to an opaque footer containing counter expressions.
+        for category in ("footer", "header"):
+            blocks = getattr(section, f"{category}_default")
+            detected = self._detect_page_numbering(blocks, category)
+            if detected and not section.page_numbering:
+                section.page_numbering, section.page_number_align = detected
+                setattr(section, f"{category}_default", [])
+                break
         self.doc.sections.append(section)
         return section
+
+    @staticmethod
+    def _detect_page_numbering(blocks: list[Block], category: str) -> tuple[str, str] | None:
+        if len(blocks) != 1 or not isinstance(blocks[0], Paragraph):
+            return None
+        paragraph = blocks[0]
+        pieces: list[str] = []
+        saw_page = False
+        for inline in paragraph.inlines:
+            if isinstance(inline, Text):
+                pieces.append(inline.text)
+                continue
+            if isinstance(inline, Field):
+                command = re.sub(r"\s+", " ", inline.code.strip()).split(" ", 1)[0].upper()
+                if command == "PAGE":
+                    saw_page = True
+                    pieces.append("1")
+                    continue
+                if command in {"NUMPAGES", "SECTIONPAGES"}:
+                    pieces.append("1")
+                    continue
+            return None
+        if not saw_page:
+            return None
+        pattern = "".join(pieces).strip()
+        # Avoid treating prose footers such as "Page 1 of 20" as Typst numbering
+        # patterns because alphabetic counting symbols inside words are meaningful in
+        # Typst numbering strings.  The native forms generated by typx are deliberately
+        # limited to these safe patterns.
+        if not (re.fullmatch(r"[()\[\].:\-\s0-9]*1(?:\s+of\s+1)?[()\[\].:\-\s0-9]*", pattern, re.IGNORECASE)
+                or pattern in {"i", "I", "a", "A"}):
+            return None
+        horizontal = paragraph.style.align or "center"
+        horizontal = {"both": "center", "justify": "center", "start": "left", "end": "right"}.get(horizontal, horizontal)
+        vertical = "top" if category == "header" else "bottom"
+        return pattern or "1", f"{vertical} + {horizontal}"
 
     def _revision_block_content(self, element: ET.Element, part_name: str, tag: str) -> list[Block]:
         change_type = {"ins": "insert", "del": "delete", "moveFrom": "move_from", "moveTo": "move_to"}[tag]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "typx"
-VERSION = "0.1.0"
+VERSION = "0.3.2"
 TYPST_BASELINE = "0.15.1"
 OOXML_BASELINE = "ECMA-376 5th ed. / ISO/IEC 29500:2016+2021 OPC / MS-DOCX 23.0"
 ROUNDTRIP_FORMAT = 1
@@ -42,6 +42,7 @@ NS = {
     "ds": "http://schemas.openxmlformats.org/officeDocument/2006/customXml",
     "xml": "http://www.w3.org/XML/1998/namespace",
     "typx": TYPX_NAMESPACE,
+    "b": "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
 }
 
 # ISO/IEC 29500 Strict namespace URIs are normalized to the Transitional
@@ -78,6 +79,7 @@ REL_TYPES = {
     "settings": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
     "numbering": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
     "font_table": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable",
+    "font": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font",
     "theme": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",
     "image": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
     "hyperlink": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",

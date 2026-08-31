@@ -40,6 +40,8 @@ print(sum(values))
 
 $ sum_(i=1)^n i = frac(n dot.op (n + 1), 2) $
 
+#pagebreak()
+
 == Table
 
 #table(
@@ -50,8 +52,6 @@ $ sum_(i=1)^n i = frac(n dot.op (n + 1), 2) $
   [Table], [`#table(...)`], [`w:tbl`],
 )
 
-#pagebreak()
-
 == Second page
 
-Go back to @top. The default `auto` round-trip mode embeds this source in the generated DOCX so an untouched package can recover it exactly.
+Go back to #link(<top>)[the beginning]. The default `auto` round-trip mode embeds this source in the generated DOCX so an untouched package can recover it exactly.
