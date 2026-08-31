@@ -86,9 +86,6 @@ jobs:
           name: typx-release-candidate
           path: |
             dist/typx.pyz
-            dist/typx-*.pyz
-            dist/typx-*-source.zip
-            dist/typx-*-bundle.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

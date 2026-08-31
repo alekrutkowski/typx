@@ -44,7 +44,7 @@ jobs:
       - name: Rebuild from the same checkout
         run: python scripts/build_release.py
 
-      - name: Verify deterministic hashes
+      - name: Verify deterministic hash
         run: diff -u /tmp/SHA256SUMS.first.txt dist/SHA256SUMS.txt
 
       - name: Smoke-test rolling zip application
@@ -58,9 +58,6 @@ jobs:
           name: typx-published-${{ github.sha }}
           path: |
             dist/typx.pyz
-            dist/typx-*.pyz
-            dist/typx-*-source.zip
-            dist/typx-*-bundle.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
@@ -84,6 +81,38 @@ jobs:
           git tag --force continuous "$GITHUB_SHA"
           git push origin refs/tags/continuous --force
 
+      - name: Remove obsolete rolling release assets
+        if: steps.current.outputs.publish == 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const allowed = new Set(["typx.pyz", "SHA256SUMS.txt"]);
+            let release;
+            try {
+              release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: "continuous",
+              });
+            } catch (error) {
+              if (error.status === 404) {
+                core.info("No existing continuous release yet; nothing to clean.");
+                return;
+              }
+              throw error;
+            }
+
+            for (const asset of release.data.assets) {
+              if (!allowed.has(asset.name)) {
+                core.info(`Deleting obsolete release asset: ${asset.name}`);
+                await github.rest.repos.deleteReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  asset_id: asset.id,
+                });
+              }
+            }
+
       - name: Publish rolling GitHub Release
         if: steps.current.outputs.publish == 'true'
         uses: softprops/action-gh-release@v3
@@ -97,12 +126,10 @@ jobs:
             Commit: `${{ github.sha }}`
             Package version: `${{ steps.version.outputs.version }}`
 
-            `typx.pyz` is the stable-name executable for this rolling release.
+            Download `typx.pyz` for the current rolling build. `SHA256SUMS.txt`
+            contains its SHA-256 checksum.
           files: |
             dist/typx.pyz
-            dist/typx-*.pyz
-            dist/typx-*-source.zip
-            dist/typx-*-bundle.zip
             dist/SHA256SUMS.txt
           overwrite_files: true
           fail_on_unmatched_files: true

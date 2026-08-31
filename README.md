@@ -332,17 +332,14 @@ python3 scripts/build_release.py
 python3 scripts/verify_release.py
 ```
 
-The release builder creates:
+The release builder creates only the rolling executable and its checksum manifest:
 
 ```text
 dist/typx.pyz
-dist/typx-X.Y.Z.pyz
-dist/typx-X.Y.Z-source.zip
-dist/typx-X.Y.Z-bundle.zip
 dist/SHA256SUMS.txt
 ```
 
-The ZIP and `.pyz` writers use fixed timestamps and stable ordering so the outputs are reproducible from the same source tree.
+The `.pyz` writer uses a fixed ZIP timestamp and stable ordering so the executable is reproducible from the same source tree.
 
 More detail is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -353,7 +350,7 @@ Two workflows are included:
 - **CI** runs on pushes and pull requests, tests Python 3.11 through 3.14, compiles the Python files, builds the release artifacts, verifies them, checks reproducibility, and uploads the resulting `dist` files as a workflow artifact.
 - **Release** is a reusable workflow called by CI only after the full test matrix and reproducible-build job succeed for a push to `main`. It rebuilds and verifies the artifacts, moves the rolling `continuous` tag to the successful commit, and updates the GitHub Release named **Latest main build**. Existing release assets are replaced in place.
 
-No version tag or manual GitHub release command is required. The stable rolling executable is `typx.pyz`; versioned release artifacts are published alongside it.
+No version tag or manual GitHub release command is required. The rolling Release publishes only `typx.pyz` and `SHA256SUMS.txt`.
 
 See [docs/RELEASING.md](docs/RELEASING.md).
 

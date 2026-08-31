@@ -51,7 +51,14 @@ python3 -m compileall -q src tests scripts
 python3 scripts/build_release.py
 ```
 
-The builder first creates `dist/typx.pyz`, then copies it to a versioned name and creates deterministic source and bundle ZIP files.
+The builder creates exactly two release outputs:
+
+```text
+dist/typx.pyz
+dist/SHA256SUMS.txt
+```
+
+`typx.pyz` is the executable rolling-release asset. `SHA256SUMS.txt` records its SHA-256 checksum.
 
 Verify the output:
 
@@ -71,14 +78,14 @@ Release publication does not depend on a version tag. Every successful push to `
 
 ## Reproducibility
 
-Release archives use:
+The `.pyz` writer uses:
 
 - sorted file order;
 - a fixed ZIP timestamp;
 - fixed file modes;
 - deterministic compression settings.
 
-CI runs the release builder twice and compares `SHA256SUMS.txt`. A change in hashes from an unchanged checkout is treated as a build failure.
+CI runs the release builder twice and compares `SHA256SUMS.txt`. A change in the `typx.pyz` hash from an unchanged checkout is treated as a build failure.
 
 ## DOCX development notes
 

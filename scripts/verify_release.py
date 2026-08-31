@@ -47,71 +47,50 @@ def main() -> int:
     if version != source_version():
         raise RuntimeError("Version metadata does not match")
 
-    prefix = f"typx-{version}"
-    generic_pyz = DIST / "typx.pyz"
-    pyz = DIST / f"{prefix}.pyz"
-    source_zip = DIST / f"{prefix}-source.zip"
-    bundle_zip = DIST / f"{prefix}-bundle.zip"
+    pyz = DIST / "typx.pyz"
     manifest = DIST / "SHA256SUMS.txt"
 
-    expected = [generic_pyz, pyz, source_zip, bundle_zip, manifest]
+    expected = [pyz, manifest]
     missing = [str(path) for path in expected if not path.is_file()]
     if missing:
         raise RuntimeError(f"Missing release artifacts: {missing}")
 
     recorded = checksum_manifest(manifest)
-    for path in (generic_pyz, pyz, source_zip, bundle_zip):
-        actual = sha256(path)
-        wanted = recorded.get(path.name)
-        if wanted != actual:
-            raise RuntimeError(
-                f"SHA-256 mismatch for {path.name}: manifest={wanted!r}, actual={actual!r}"
-            )
+    if set(recorded) != {pyz.name}:
+        raise RuntimeError(
+            "SHA256SUMS.txt must contain exactly one entry for typx.pyz; "
+            f"found {sorted(recorded)}"
+        )
 
-    if generic_pyz.read_bytes() != pyz.read_bytes():
-        raise RuntimeError(f"{generic_pyz.name} and {pyz.name} differ")
+    actual = sha256(pyz)
+    wanted = recorded[pyz.name]
+    if wanted != actual:
+        raise RuntimeError(
+            f"SHA-256 mismatch for {pyz.name}: manifest={wanted!r}, actual={actual!r}"
+        )
+
+    require_zip_members(
+        pyz,
+        {
+            "__main__.py",
+            "typx/cli.py",
+            "typx/constants.py",
+        },
+    )
 
     result = subprocess.run(
-        [sys.executable, str(generic_pyz), "--version"],
+        [sys.executable, str(pyz), "--version"],
         check=True,
         capture_output=True,
         text=True,
     )
     if version not in result.stdout:
-        raise RuntimeError(f"Zip application version output does not contain {version!r}: {result.stdout!r}")
+        raise RuntimeError(
+            f"Zip application version output does not contain {version!r}: {result.stdout!r}"
+        )
 
-    source_root = f"{prefix}/"
-    require_zip_members(
-        source_zip,
-        {
-            source_root + "README.md",
-            source_root + "LICENSE",
-            source_root + "pyproject.toml",
-            source_root + "src/typx/cli.py",
-            source_root + "tests/test_core.py",
-            source_root + ".github/workflows/ci.yml",
-            source_root + ".github/workflows/release.yml",
-            source_root + "scripts/build_release.py",
-            source_root + "scripts/verify_release.py",
-        },
-    )
-
-    require_zip_members(
-        bundle_zip,
-        {
-            source_root + "README.md",
-            source_root + f"dist/{prefix}.pyz",
-            source_root + "dist/SHA256SUMS.txt",
-        },
-    )
-
-    with zipfile.ZipFile(source_zip, "r") as archive:
-        if any(name.startswith(source_root + "dist/") for name in archive.namelist()):
-            raise RuntimeError("Source ZIP unexpectedly contains dist/ artifacts")
-
-    print(f"Verified typx {version} release artifacts")
-    for path in (generic_pyz, pyz, source_zip, bundle_zip):
-        print(f"{sha256(path)}  {path.name}")
+    print(f"Verified typx {version} rolling release artifact")
+    print(f"{actual}  {pyz.name}")
     return 0
 
 
